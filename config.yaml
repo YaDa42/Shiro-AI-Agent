@@ -1,0 +1,9 @@
+llm:
+  provider: "GROQ_OR_OLLAMA"
+  model: "OLLAMA_VISION_MODEL"
+  host: "http://localhost:11434"
+  groq_api_key: "gsk_KEY"
+  groq_model: "qwen/qwen3.8-27b"
+
+agent:
+  max_steps: 125

@@ -1,0 +1,7 @@
+ollama
+groq
+pyautogui
+pyperclip
+pyyaml
+requests
+pillow
