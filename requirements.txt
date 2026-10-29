@@ -5,3 +5,7 @@ pyperclip
 pyyaml
 requests
 pillow
+numpy
+flask
+uiautomation
+rapidocr-onnxruntime
