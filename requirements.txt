@@ -1,3 +1,4 @@
+openai
 ollama
 groq
 pyautogui
@@ -9,3 +10,4 @@ numpy
 flask
 uiautomation
 rapidocr-onnxruntime
+python-telegram-bot
