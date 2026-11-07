@@ -39,7 +39,7 @@ MESSAGES = {
         "help": """Commands:
   any phrase         run a task, e.g.: open word
   models             show available models
-  provider ollama|groq|openai
+  provider ollama|groq|openai|gemini
   model <name>       choose model for the current provider
   lang en|ru         switch interface language
   stop               stop the agent
@@ -55,12 +55,13 @@ MESSAGES = {
         "current": "Current",
         "lang_set": "Language: English",
         "lang_bad": "Use: lang en  or  lang ru",
-        "provider_bad": "Use: provider ollama, groq or openai",
+        "provider_bad": "Use: provider ollama, groq, openai or gemini",
         "model_set": "Model",
         "task": "Task",
         "not_found": "text not found on screen",
         "clicked": "clicked",
         "no_api_key": "OpenAI API key is not set. Set the OPENAI_API_KEY environment variable.",
+        "no_gemini_key": "Gemini API key is not set. Set the GEMINI_API_KEY environment variable or gemini_api_key in config.yaml.",
         "song_ask": "Which song should I play?",
         "song_open": "Opened YouTube Music. Pick the track manually.",
         "search_open": "Search opened.",
@@ -79,7 +80,7 @@ MESSAGES = {
         "help": """Команды:
   любая фраза        выполнить задачу, например: открой ворд
   модели             показать доступные модели
-  провайдер ollama|groq|openai
+  провайдер ollama|groq|openai|gemini
   модель <имя>       выбрать модель для текущего провайдера
   lang en|ru         сменить язык интерфейса
   стоп               остановить агента
@@ -95,12 +96,13 @@ MESSAGES = {
         "current": "Сейчас",
         "lang_set": "Язык: русский",
         "lang_bad": "Пиши: lang en  или  lang ru",
-        "provider_bad": "Пиши: провайдер ollama, groq или openai",
+        "provider_bad": "Пиши: провайдер ollama, groq, openai или gemini",
         "model_set": "Модель",
         "task": "Задача",
         "not_found": "текст на экране не найден",
         "clicked": "клик по",
         "no_api_key": "Не задан API-ключ OpenAI. Установи переменную OPENAI_API_KEY.",
+        "no_gemini_key": "Не задан ключ Gemini. Установи переменную GEMINI_API_KEY или gemini_api_key в config.yaml.",
         "song_ask": "Какую песню включить?",
         "song_open": "Открыл YouTube Music. Выбери трек вручную.",
         "search_open": "Открыл поиск.",
@@ -134,9 +136,16 @@ GROQ_PRESETS = [
 ]
 
 OPENAI_PRESETS = [
-    "gpt-6-luna",
-    "gpt-6-astra",
+    "gpt-4.1-mini",
+    "gpt-4o-mini",
 ]
+
+GEMINI_PRESETS = [
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+]
+
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 SET = {
     "provider": LLM.get("provider", "ollama"),
@@ -146,10 +155,12 @@ SET = {
     "groq_key": LLM.get("groq_api_key", ""),
     "openai_model": LLM.get("openai_model", "gpt-4.1-mini"),
     "openai_key": os.environ.get("OPENAI_API_KEY", LLM.get("openai_api_key", "")),
+    "gemini_model": LLM.get("gemini_model", GEMINI_PRESETS[0]),
+    "gemini_key": os.environ.get("GEMINI_API_KEY", LLM.get("gemini_api_key", "")),
     "use_screenshot": LLM.get("use_screenshot", True),
 }
 
-SYSTEM = """Ты управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
+SYSTEM = """Ты Shiro Ai Agent и ты  управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
 Ответ — ОДИН JSON-объект, без пояснений и без текста после него. Допустимые действия:
 
 {"action": "open_app", "name": "paint"}              открыть приложение через меню Пуск
@@ -447,6 +458,8 @@ def current_model() -> str:
         return SET["ollama_model"]
     if provider == "openai":
         return SET["openai_model"]
+    if provider == "gemini":
+        return SET["gemini_model"]
     return SET["groq_model"]
 
 
@@ -532,6 +545,32 @@ def ask_model(goal, history, shot_b64, w, h):
                 {"role": "user", "content": content},
             ],
             max_completion_tokens=2000,
+        )
+        text = resp.choices[0].message.content or ""
+        if not text.strip():
+            raise ValueError("empty model response, try again")
+
+    elif SET["provider"] == "gemini":
+        from openai import OpenAI
+
+        if not SET["gemini_key"]:
+            raise RuntimeError(t("no_gemini_key"))
+
+        client = OpenAI(api_key=SET["gemini_key"], base_url=GEMINI_BASE_URL)
+        content = [{"type": "text", "text": prompt}]
+        if shot_b64:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{shot_b64}"},
+            })
+        resp = client.chat.completions.create(
+            model=SET["gemini_model"],
+            messages=[
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.1,
+            max_tokens=600,
         )
         text = resp.choices[0].message.content or ""
         if not text.strip():
@@ -790,13 +829,15 @@ def stop_agent():
 
 
 def set_model(provider=None, model=None):
-    if provider in ("ollama", "groq", "openai"):
+    if provider in ("ollama", "groq", "openai", "gemini"):
         SET["provider"] = provider
     if model:
         if SET["provider"] == "ollama":
             SET["ollama_model"] = model
         elif SET["provider"] == "openai":
             SET["openai_model"] = model
+        elif SET["provider"] == "gemini":
+            SET["gemini_model"] = model
         else:
             SET["groq_model"] = model
 
@@ -810,6 +851,9 @@ def show_models():
         print("  ", m, flush=True)
     print("OpenAI:", flush=True)
     for m in OPENAI_PRESETS:
+        print("  ", m, flush=True)
+    print("Gemini:", flush=True)
+    for m in GEMINI_PRESETS:
         print("  ", m, flush=True)
     out(f"{t('current')}: {SET['provider']} / {current_model()}")
 
@@ -832,7 +876,7 @@ def handle_command(line: str):
             out(t("lang_bad"))
     elif low.startswith("провайдер ") or low.startswith("provider "):
         p = low.split(maxsplit=1)[1].strip()
-        if p in ("ollama", "groq", "openai"):
+        if p in ("ollama", "groq", "openai", "gemini"):
             set_model(provider=p)
             out(f"{SET['provider']} / {current_model()}")
         else:
@@ -890,6 +934,7 @@ PAGE = """<!doctype html>
     <option value="ollama">Ollama (local)</option>
     <option value="groq">Groq (cloud)</option>
     <option value="openai">OpenAI (cloud)</option>
+    <option value="gemini">Gemini (cloud)</option>
   </select>
   <input id="model" class="grow" list="models" placeholder="Model">
   <datalist id="models"></datalist>
@@ -911,7 +956,7 @@ PAGE = """<!doctype html>
 
 <script>
 const $ = id => document.getElementById(id);
-let models = {ollama: [], groq: [], openai: []};
+let models = {ollama: [], groq: [], openai: [], gemini: []};
 let lastProvider = null;
 
 async function load() {
@@ -998,6 +1043,7 @@ def api_state():
             "ollama": list_ollama_models(),
             "groq": GROQ_PRESETS,
             "openai": OPENAI_PRESETS,
+            "gemini": GEMINI_PRESETS,
         },
     )
 
