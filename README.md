@@ -6,7 +6,7 @@
 
 # 
 
-# \*\*Shiro AI\*\* is an open-source AI agent written in Python. It can interact with computer interfaces and perform automated actions using an AI model.
+# Shiro AI is an open-source AI agent written in Python. It can interact with computer interfaces and perform automated actions using an AI model.
 
 # 
 
@@ -66,7 +66,7 @@
 
 # 
 
-# \*\*Shiro AI\*\* — это ИИ-агент с открытым исходным кодом, написанный на Python. Он может взаимодействовать с интерфейсом компьютера и выполнять автоматизированные действия с помощью ИИ-модели.
+# \\*Shiro AI\\ — это ИИ-агент с открытым исходным кодом, написанный на Python. Он может взаимодействовать с интерфейсом компьютера и выполнять автоматизированные действия с помощью ИИ-модели.
 
 # 
 
