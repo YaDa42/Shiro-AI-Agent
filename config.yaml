@@ -20,5 +20,5 @@ agent:
 
 telegram:
   token: "BOT_TOKEN"
-  owner_id: XXXX
+  owner_id: 0000
 #DO NOT CHANGE groq_model

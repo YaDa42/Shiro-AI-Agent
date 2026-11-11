@@ -4,7 +4,7 @@ try:
 except Exception:
     pass
 
-import asyncio, base64, io, json, logging, os, re, secrets, threading, time, urllib.parse, webbrowser, difflib
+import asyncio, base64, io, json, logging, os, re, threading, time, urllib.parse, webbrowser, difflib, uuid
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +13,11 @@ import pyperclip
 import requests
 import uiautomation as auto
 import yaml
+import os
+import sys
+import time
+import threading
+from datetime import datetime
 from flask import Flask, jsonify, request, Response
 from PIL import ImageDraw
 from telegram import Update
@@ -26,7 +31,6 @@ TG = cfg.get("telegram", {})
 MAX_STEPS = AG.get("max_steps", 25)
 WEB_HOST = AG.get("web_host", "127.0.0.1")
 WEB_PORT = AG.get("web_port", 8000)
-WEB_TOKEN = AG.get("web_token", "") or os.environ.get("SHIRO_WEB_TOKEN", "")
 DESKTOP = (Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop").resolve()
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -317,6 +321,67 @@ STATE = {"busy": False, "stop": False, "question": None, "last": ""}
 ANSWER = {"text": ""}
 ANSWER_EVENT = threading.Event()
 TG_APP = {"app": None, "loop": None, "chat_id": None}
+
+
+# ---------- scheduler ----------
+SCHEDULE_FILE = BASE / "scheduled_tasks.json"
+SCHEDULE_LOCK = threading.RLock()
+SCHEDULES = []
+
+def load_schedules():
+    global SCHEDULES
+    try:
+        data = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+        SCHEDULES = data if isinstance(data, list) else []
+    except FileNotFoundError:
+        SCHEDULES = []
+    except Exception as e:
+        print(f"Scheduler: could not load schedule file: {e}", flush=True)
+        SCHEDULES = []
+
+def save_schedules():
+    with SCHEDULE_LOCK:
+        temp = SCHEDULE_FILE.with_suffix(".tmp")
+        temp.write_text(json.dumps(SCHEDULES, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(SCHEDULE_FILE)
+
+def scheduler_loop():
+    while True:
+        now = datetime.now()
+        due = None
+        with SCHEDULE_LOCK:
+            for item in SCHEDULES:
+                if item.get("enabled", True):
+                    try:
+                        when = datetime.fromisoformat(item["run_at"])
+                    except Exception:
+                        item["enabled"] = False
+                        continue
+                    if when <= now:
+                        due = item
+                        break
+            if due:
+                if STATE["busy"]:
+                    due["run_at"] = (now + timedelta(minutes=1)).isoformat(timespec="minutes")
+                    due["last_result"] = "Отложено: Shiro был занят"
+                    save_schedules()
+                    due = None
+                else:
+                    due["enabled"] = False
+                    due["last_result"] = "Запускается"
+                    save_schedules()
+        if due:
+            goal = str(due.get("goal", "")).strip()
+            if goal:
+                started = start_goal(goal)
+                with SCHEDULE_LOCK:
+                    due["last_result"] = "Запущено" if started else "Не удалось запустить"
+                    save_schedules()
+        time.sleep(1)
+
+def start_scheduler():
+    load_schedules()
+    threading.Thread(target=scheduler_loop, daemon=True, name="ShiroScheduler").start()
 
 # Actions that change the screen and therefore need a precondition and a guard
 CAN_GUARD = ("click", "click_text", "double_click_text", "type", "hotkey")
@@ -1205,173 +1270,84 @@ def console_loop():
         handle_command(line)
 
 
-# ---------- web panel (local only, token required for changes) ----------
+# ---------- web panel (localhost only, no token login) ----------
 app = Flask(__name__)
 
-if not WEB_TOKEN:
-    WEB_TOKEN = secrets.token_urlsafe(16)
-    print(f"Web panel token (set web_token in config.yaml to keep it): {WEB_TOKEN}", flush=True)
-
-
-def _check_token():
-    """Changing requests need the token in the X-Token header."""
-    if request.headers.get("X-Token", "") != WEB_TOKEN:
-        return jsonify(error="forbidden"), 403
-    return None
-
-
 PAGE = """<!doctype html>
-<html><head><meta charset="utf-8">
-<title>Agent</title>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shiro Control Center</title>
 <style>
- body{font-family:system-ui,sans-serif;max-width:720px;margin:28px auto;padding:0 16px;background:#111;color:#eee}
- h2{margin-bottom:4px} .muted{color:#888;font-size:14px}
- .row{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
- input,select{padding:10px;font-size:15px;background:#222;color:#eee;border:1px solid #444;border-radius:6px}
- input.grow{flex:1;min-width:200px}
- button{padding:10px 16px;font-size:15px;border-radius:6px;border:0;cursor:pointer;color:#fff}
- .go{background:#2e7d32} .stop{background:#c62828} .apply{background:#1565c0}
- #status{margin:12px 0;padding:10px;background:#1b1b1b;border-radius:6px;min-height:20px}
- #question{display:none;margin:12px 0;padding:12px;background:#3a2a00;border-radius:6px;color:#ffcc80}
-</style></head><body>
-<h2>Agent control</h2>
-<div class="muted" id="currentModel"></div>
-<div class="row"><input id="token" class="grow" placeholder="Access token (from the console)" type="password"></div>
-
-<div class="row">
-  <select id="provider">
-    <option value="ollama">Ollama (local)</option>
-    <option value="groq">Groq (cloud)</option>
-    <option value="openai">OpenAI (cloud)</option>
-    <option value="gemini">Gemini (cloud)</option>
-  </select>
-  <input id="model" class="grow" list="models" placeholder="Model">
-  <datalist id="models"></datalist>
-  <button class="apply" onclick="applySettings()">Apply</button>
-</div>
-
-<div class="row">
-  <input id="goal" class="grow" placeholder="e.g. open word" autofocus>
-  <button class="go" onclick="runTask()">Run</button>
-  <button class="stop" onclick="stopAgent()">Stop</button>
-</div>
-
-<div id="status"></div>
-<div id="question">
-  <div id="qtext"></div>
-  <div class="row"><input id="answer" class="grow" placeholder="Answer the agent">
-  <button class="go" onclick="sendAnswer()">Reply</button></div>
-</div>
-
+:root{color-scheme:dark;--bg:#090d18;--panel:#111a2b;--panel2:#172238;--line:#263650;--muted:#91a1bb;--text:#edf3ff;--accent:#8b7cff;--cyan:#4dd9d0;--red:#ff647c;--green:#50d6a0}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#20204b 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,Segoe UI,sans-serif}
+.wrap{max-width:1180px;margin:auto;padding:30px 22px 60px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px}
+.brand{display:flex;align-items:center;gap:13px}.logo{width:48px;height:48px;border-radius:15px;background:linear-gradient(135deg,var(--accent),var(--cyan));display:grid;place-items:center;font-size:25px;font-weight:900;color:#07111d;box-shadow:0 8px 30px #766bff55}
+h1{font-size:25px;margin:0;letter-spacing:-.7px}.sub{color:var(--muted);font-size:13px;margin-top:3px}.pill{border:1px solid var(--line);background:#111a2b;padding:8px 13px;border-radius:99px;color:var(--muted);font-size:12px}
+.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}.card{background:linear-gradient(160deg,#151f33,#101827);border:1px solid var(--line);border-radius:19px;padding:20px;box-shadow:0 14px 35px #0002}
+.card h2{font-size:16px;margin:0 0 16px}.wide{grid-column:1/-1}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+input,select{width:100%;min-width:0;background:#0b1322;border:1px solid #30415e;border-radius:11px;padding:12px 13px;color:var(--text);font:inherit;outline:none}
+input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px #8b7cff22}.grow{flex:1}.field{flex:1;min-width:180px}
+button{border:0;border-radius:11px;padding:11px 16px;font:700 13px system-ui;cursor:pointer;color:#08111e;background:linear-gradient(135deg,var(--cyan),#8ce6d0);transition:.15s}
+button:hover{filter:brightness(1.1);transform:translateY(-1px)}button.secondary{background:#263653;color:var(--text)}button.stop{background:#4a2435;color:#ff9eae}button.purple{background:linear-gradient(135deg,#9b8cff,#6b91ff)}
+.status{margin-top:15px;border:1px solid var(--line);border-radius:13px;padding:14px;background:#0b1322;min-height:55px;color:#c8d5eb;white-space:pre-wrap}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:8px}.dot.busy{background:#ffc66d;box-shadow:0 0 12px #ffc66d88}
+.question{display:none;margin-top:12px;padding:14px;border-radius:13px;background:#332b19;border:1px solid #66502b}.question p{margin:0 0 10px;color:#ffda9c}
+.schedule-list{display:grid;gap:10px;margin-top:15px}.schedule{display:flex;justify-content:space-between;gap:12px;align-items:center;background:#0b1322;border:1px solid var(--line);padding:13px;border-radius:13px}.schedule strong{display:block;font-size:14px}.schedule small{display:block;color:var(--muted);margin-top:4px}.empty{color:var(--muted);padding:16px;text-align:center;border:1px dashed var(--line);border-radius:12px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.wrap{padding:20px 14px}.top{align-items:flex-start;flex-direction:column}.schedule{align-items:flex-start;flex-direction:column}}
+</style></head><body><main class="wrap">
+<header class="top"><div class="brand"><div class="logo">S</div><div><h1>Shiro Control Center</h1><div class="sub">Five Banana · Desktop Agent</div></div></div><div class="pill" id="clock">LOCAL TIME</div></header>
+<div class="grid">
+<section class="card"><h2>⚡ Управление агентом</h2>
+<div class="row"><div class="field"><label class="sub">Провайдер</label><select id="provider"><option value="ollama">Ollama</option><option value="groq">Groq</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
+<div class="field"><label class="sub">Модель</label><input id="model" list="models" placeholder="Название модели"><datalist id="models"></datalist></div><button class="secondary" onclick="applySettings()">Применить</button></div>
+<div class="row" style="margin-top:15px"><input id="goal" class="grow" placeholder="Например: открой блокнот"><button class="purple" onclick="runTask()">Запустить</button><button class="stop" onclick="stopAgent()">Стоп</button></div>
+<div class="status" id="status"><span class="dot"></span>Подключение...</div>
+<div class="question" id="question"><p id="qtext"></p><div class="row"><input id="answer" class="grow" placeholder="Ответ Shiro"><button onclick="sendAnswer()">Ответить</button></div></div>
+</section>
+<section class="card"><h2>🧠 Состояние</h2><div class="status" id="state">Загрузка...</div><p class="sub">Панель доступна только на этом компьютере через localhost.</p></section>
+<section class="card wide"><h2>⏰ Планировщик</h2>
+<div class="row"><div class="field"><label class="sub">Задача для Shiro</label><input id="scheduleGoal" placeholder="Например: открой браузер"></div><div class="field"><label class="sub">Дата и время запуска (локальное время ПК)</label><input id="scheduleTime" type="datetime-local"></div><button onclick="addSchedule()">Добавить</button></div>
+<div class="schedule-list" id="schedules"><div class="empty">Пока нет запланированных задач</div></div>
+</section></div></main>
 <script>
-const $ = id => document.getElementById(id);
-let models = {ollama: [], groq: [], openai: [], gemini: []};
-let lastProvider = null;
-
-function post(url, body) {
-  return fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'X-Token': $('token').value},
-    body: JSON.stringify(body || {})
-  });
-}
-
-async function load() {
-  const s = await (await fetch('/api/state')).json();
-  models = s.models;
-  $('status').textContent = (s.busy ? 'Working. ' : 'Idle. ') + (s.last || '');
-  $('currentModel').textContent = 'Current: ' + s.provider + ' / ' + s.model;
-  if (!$('provider').matches(':focus')) $('provider').value = s.provider;
-  if (lastProvider !== s.provider) {
-    lastProvider = s.provider;
-    $('models').innerHTML = (models[s.provider] || []).map(m => `<option value="${m}">`).join('');
-  }
-  if (document.activeElement !== $('model')) $('model').value = s.model;
-  $('question').style.display = s.question ? 'block' : 'none';
-  $('qtext').textContent = s.question ? 'Agent asks: ' + s.question : '';
-}
-
-async function applySettings() {
-  const r = await post('/api/settings', {provider: $('provider').value, model: $('model').value.trim()});
-  if (r.status === 403) alert('Wrong token.');
-  lastProvider = null;
-  load();
-}
-
-async function runTask() {
-  const goal = $('goal').value.trim();
-  if (!goal) return;
-  const r = await post('/api/task', {goal});
-  if (r.status === 403) return alert('Wrong token.');
-  if (r.status === 409) alert('Agent is busy. Press Stop or wait.');
-  $('goal').value = '';
-  load();
-}
-
-async function stopAgent() {
-  const r = await post('/api/stop');
-  if (r.status === 403) alert('Wrong token.');
-  load();
-}
-
-async function sendAnswer() {
-  const text = $('answer').value;
-  $('answer').value = '';
-  const r = await post('/api/answer', {text});
-  if (r.status === 403) alert('Wrong token.');
-  load();
-}
-
-$('goal').addEventListener('keydown', e => { if (e.key === 'Enter') runTask(); });
-$('answer').addEventListener('keydown', e => { if (e.key === 'Enter') sendAnswer(); });
-$('provider').addEventListener('change', () => {
-  const provider = $('provider').value;
-  $('models').innerHTML = (models[provider] || []).map(m => `<option value="${m}">`).join('');
-  $('model').value = (models[provider] || [''])[0] || '';
-});
-
-setInterval(load, 1000);
-load();
+const $=id=>document.getElementById(id);let models={ollama:[],groq:[],openai:[],gemini:[]};let lastProvider=null;
+async function api(url,body){const opts=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};const r=await fetch(url,opts);let data={};try{data=await r.json()}catch{}if(!r.ok)throw Error(data.error||('HTTP '+r.status));return data}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function load(){try{const s=await api('/api/state');models=s.models||models;$('status').innerHTML='<span class="dot '+(s.busy?'busy':'')+'"></span>'+(s.busy?'Shiro выполняет задачу':'Shiro свободен')+(s.last?'<br>'+esc(s.last):'');$('state').textContent='Провайдер: '+s.provider+'\\nМодель: '+s.model+'\\nСостояние: '+(s.busy?'Работает':'Ожидает');if(document.activeElement!==$('provider'))$('provider').value=s.provider;if(lastProvider!==s.provider){lastProvider=s.provider;$('models').innerHTML=(models[s.provider]||[]).map(m=>'<option value="'+esc(m)+'">').join('')}if(document.activeElement!==$('model'))$('model').value=s.model;$('question').style.display=s.question?'block':'none';$('qtext').textContent=s.question||'';renderSchedules(s.schedules||[])}catch(e){$('status').textContent='Ошибка соединения: '+e.message}}
+function renderSchedules(items){$('schedules').innerHTML=items.length?items.map(x=>`<div class="schedule"><div><strong>${esc(x.goal)}</strong><small>${esc(x.run_at.replace('T',' '))} · ${x.enabled?'Ожидает':'Завершено / отключено'}${x.last_result?' · '+esc(x.last_result):''}</small></div><button class="stop" onclick="deleteSchedule('${esc(x.id)}')">Удалить</button></div>`).join(''):'<div class="empty">Пока нет запланированных задач</div>'}
+async function applySettings(){try{await api('/api/settings',{provider:$('provider').value,model:$('model').value.trim()});lastProvider=null;await load()}catch(e){alert(e.message)}}
+async function runTask(){const goal=$('goal').value.trim();if(!goal)return;try{await api('/api/task',{goal});$('goal').value='';await load()}catch(e){alert(e.message)}}
+async function stopAgent(){try{await api('/api/stop');await load()}catch(e){alert(e.message)}}
+async function sendAnswer(){const text=$('answer').value.trim();if(!text)return;try{await api('/api/answer',{text});$('answer').value='';await load()}catch(e){alert(e.message)}}
+async function addSchedule(){const goal=$('scheduleGoal').value.trim(),run_at=$('scheduleTime').value;if(!goal||!run_at)return alert('Укажи задачу и время запуска.');try{await api('/api/schedules',{goal,run_at});$('scheduleGoal').value='';$('scheduleTime').value='';await load()}catch(e){alert(e.message)}}
+async function deleteSchedule(id){try{await fetch('/api/schedules/'+encodeURIComponent(id),{method:'DELETE'});await load()}catch(e){alert(e.message)}}
+$('goal').addEventListener('keydown',e=>{if(e.key==='Enter')runTask()});$('answer').addEventListener('keydown',e=>{if(e.key==='Enter')sendAnswer()});$('provider').addEventListener('change',()=>{const p=$('provider').value;$('models').innerHTML=(models[p]||[]).map(m=>'<option value="'+esc(m)+'">').join('');$('model').value=(models[p]||[''])[0]||''});
+function tick(){ $('clock').textContent=new Date().toLocaleString() }tick();setInterval(tick,1000);setInterval(load,1500);load();
 </script></body></html>"""
-
 
 @app.route("/")
 def index():
     return Response(PAGE, mimetype="text/html")
 
-
 @app.route("/api/state")
 def api_state():
+    with SCHEDULE_LOCK:
+        schedules = [dict(x) for x in SCHEDULES]
     return jsonify(
-        busy=STATE["busy"],
-        question=STATE["question"],
-        last=STATE["last"],
-        provider=SET["provider"],
-        model=current_model(),
-        models={
-            "ollama": list_ollama_models(),
-            "groq": GROQ_PRESETS,
-            "openai": OPENAI_PRESETS,
-            "gemini": GEMINI_PRESETS,
-        },
+        busy=STATE["busy"], question=STATE["question"], last=STATE["last"],
+        provider=SET["provider"], model=current_model(),
+        models={"ollama": list_ollama_models(), "groq": GROQ_PRESETS,
+                "openai": OPENAI_PRESETS, "gemini": GEMINI_PRESETS},
+        schedules=schedules,
     )
-
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
-    denied = _check_token()
-    if denied:
-        return denied
     data = request.get_json(silent=True) or {}
     set_model(provider=data.get("provider"), model=data.get("model"))
     return jsonify(ok=True, provider=SET["provider"], model=current_model())
 
-
 @app.route("/api/task", methods=["POST"])
 def api_task():
-    denied = _check_token()
-    if denied:
-        return denied
     goal = (request.get_json(silent=True) or {}).get("goal", "").strip()
     if not goal:
         return jsonify(error="empty"), 400
@@ -1379,31 +1355,57 @@ def api_task():
         return jsonify(error="busy"), 409
     return jsonify(ok=True)
 
-
 @app.route("/api/answer", methods=["POST"])
 def api_answer():
-    denied = _check_token()
-    if denied:
-        return denied
     ANSWER["text"] = (request.get_json(silent=True) or {}).get("text", "")
     ANSWER_EVENT.set()
     return jsonify(ok=True)
 
-
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    denied = _check_token()
-    if denied:
-        return denied
     stop_agent()
     return jsonify(ok=True)
 
+@app.route("/api/schedules", methods=["GET", "POST"])
+def api_schedules():
+    if request.method == "GET":
+        with SCHEDULE_LOCK:
+            return jsonify(items=[dict(x) for x in SCHEDULES])
+    data = request.get_json(silent=True) or {}
+    goal = str(data.get("goal", "")).strip()
+    run_at = str(data.get("run_at", "")).strip()
+    if not goal or len(goal) > MAX_TEXT:
+        return jsonify(error="invalid goal"), 400
+    try:
+        when = datetime.fromisoformat(run_at)
+    except Exception:
+        return jsonify(error="invalid date/time"), 400
+    if when <= datetime.now():
+        return jsonify(error="time must be in the future"), 400
+    item = {"id": uuid.uuid4().hex[:12], "goal": goal,
+            "run_at": when.isoformat(timespec="minutes"), "enabled": True, "last_result": ""}
+    with SCHEDULE_LOCK:
+        SCHEDULES.append(item)
+        save_schedules()
+    return jsonify(ok=True, item=item), 201
+
+@app.route("/api/schedules/<task_id>", methods=["DELETE"])
+def api_delete_schedule(task_id):
+    with SCHEDULE_LOCK:
+        before = len(SCHEDULES)
+        SCHEDULES[:] = [x for x in SCHEDULES if x.get("id") != task_id]
+        if len(SCHEDULES) == before:
+            return jsonify(error="not found"), 404
+        save_schedules()
+    return jsonify(ok=True)
 
 def run_web():
+    # No token login: bind to loopback so the unauthenticated control panel is not exposed to the LAN.
     app.run(host="127.0.0.1", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
+    start_scheduler()
     threading.Thread(target=run_web, daemon=True).start()
     start_telegram()
     console_loop()
