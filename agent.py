@@ -4,7 +4,7 @@ try:
 except Exception:
     pass
 
-import asyncio, base64, io, json, logging, os, re, threading, time, urllib.parse, webbrowser, difflib
+import asyncio, base64, io, json, logging, os, re, secrets, threading, time, urllib.parse, webbrowser, difflib
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +26,8 @@ TG = cfg.get("telegram", {})
 MAX_STEPS = AG.get("max_steps", 25)
 WEB_HOST = AG.get("web_host", "127.0.0.1")
 WEB_PORT = AG.get("web_port", 8000)
-DESKTOP = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
+WEB_TOKEN = AG.get("web_token", "") or os.environ.get("SHIRO_WEB_TOKEN", "")
+DESKTOP = (Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop").resolve()
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 TG_TOKEN = TG.get("token", "") or os.environ.get("TELEGRAM_TOKEN", "")
@@ -48,6 +49,7 @@ MESSAGES = {
         "stopping": "Stopping...",
         "stopped": "Stopped.",
         "done": "Done: ",
+        "done_rejected": "Done is not accepted: the last action was not confirmed. Continuing.",
         "step_limit": "Step limit reached.",
         "repeat": "The same action repeats, stopping.",
         "ask_hint": "(answer in the console, the web panel or Telegram)",
@@ -71,6 +73,16 @@ MESSAGES = {
         "none_models": "(none, or Ollama is not running)",
         "clicks_stop": "Four clicks in a row did nothing. Stopping. Check whether the input field is visible, or try a task that uses type without clicks.",
         "screenshot_failed": "screenshot not sent: ",
+        "retry": "Gemini is overloaded, waiting {wait} s and retrying ({i}/{tries})",
+        "verify_ok": "expectation met",
+        "verify_fail": "expectation not met",
+        "verify_none": "expectation not checked",
+        "guard_block": "action blocked by guard",
+        "safety_block": "action blocked by safety check",
+        "no_precondition": "precondition is missing, action not performed; ask the model to add it",
+        "no_screenshot_for_safety": "safety check needs a screenshot, action blocked",
+        "invalid_action": "invalid action, not performed",
+        "path_bad": "path is outside the Desktop folder or has a bad name",
         "tg_ready": "Telegram bot is running.",
         "tg_disabled": "Telegram bot is off: set telegram.token and telegram.owner_id in config.yaml.",
         "tg_denied": "Access denied: this bot only takes commands from its owner.",
@@ -89,6 +101,7 @@ MESSAGES = {
         "stopping": "Останавливаю...",
         "stopped": "Остановлено.",
         "done": "Готово: ",
+        "done_rejected": "Завершение не принято: последнее действие не подтверждено. Продолжаю.",
         "step_limit": "Лимит шагов исчерпан.",
         "repeat": "Одно и то же действие повторяется, останавливаюсь.",
         "ask_hint": "(ответь в консоли, в веб-панели или в Telegram)",
@@ -112,6 +125,16 @@ MESSAGES = {
         "none_models": "(нет или Ollama не запущена)",
         "clicks_stop": "Четыре клика подряд ничего не дали. Останавливаюсь. Проверь, видно ли поле ввода, или попробуй задачу с type без кликов.",
         "screenshot_failed": "скриншот не отправлен: ",
+        "retry": "Gemini перегружен, жду {wait} сек и пробую снова ({i}/{tries})",
+        "verify_ok": "ожидание выполнено",
+        "verify_fail": "ожидание не выполнено",
+        "verify_none": "ожидание не проверено",
+        "guard_block": "действие заблокировано guard",
+        "safety_block": "действие заблокировано проверкой безопасности",
+        "no_precondition": "не указано условие (precondition), действие не выполнено; модели нужно его добавить",
+        "no_screenshot_for_safety": "для проверки безопасности нужен скриншот, действие заблокировано",
+        "invalid_action": "некорректное действие, не выполнено",
+        "path_bad": "путь вне папки Desktop или недопустимое имя файла",
         "tg_ready": "Telegram-бот запущен.",
         "tg_disabled": "Telegram-бот выключен: задай telegram.token и telegram.owner_id в config.yaml.",
         "tg_denied": "Доступ запрещён: бот принимает команды только от владельца.",
@@ -158,25 +181,30 @@ SET = {
     "gemini_model": LLM.get("gemini_model", GEMINI_PRESETS[0]),
     "gemini_key": os.environ.get("GEMINI_API_KEY", LLM.get("gemini_api_key", "")),
     "use_screenshot": LLM.get("use_screenshot", True),
+    "verify": LLM.get("verify", True),
+    "guard": LLM.get("guard", True),
+    "safety_guard": LLM.get("safety_guard", False),
+    # If true, done is accepted without a confirmed check. Off by default.
+    "trust_done": LLM.get("trust_done", False),
 }
 
-SYSTEM = """Ты Shiro Ai Agent и ты  управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
+SYSTEM = """Ты управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
 Ответ — ОДИН JSON-объект, без пояснений и без текста после него. Допустимые действия:
 
-{"action": "open_app", "name": "paint"}              открыть приложение через меню Пуск
-{"action": "open_url", "url": "https://..."}         открыть страницу в браузере
-{"action": "click_text", "text": "Сохранить"}        клик по тексту/кнопке на экране
-{"action": "double_click_text", "text": "Файл"}      двойной клик по тексту
-{"action": "click", "x": 100, "y": 200}              клик по координатам с сетки (для полей и иконок без подписи)
-{"action": "type", "text": "..."}                    напечатать текст в активное окно
-{"action": "hotkey", "keys": ["enter"]}              нажать клавишу или сочетание
-{"action": "scroll", "amount": -500}                 отрицательное = вниз
+{"action": "open_app", "name": "paint", "expect": "окно Paint открыто"}
+{"action": "open_url", "url": "https://...", "expect": "страница загружена"}
+{"action": "click_text", "text": "Сохранить", "precondition": "диалог открыт", "expect": "диалог сохранения открыт"}
+{"action": "double_click_text", "text": "Файл", "precondition": "...", "expect": "..."}
+{"action": "click", "x": 100, "y": 200, "precondition": "...", "expect": "..."}  координаты с сетки (для полей и иконок без подписи)
+{"action": "type", "text": "...", "precondition": "поле ввода активно", "expect": "текст виден в поле"}
+{"action": "hotkey", "keys": ["enter"], "precondition": "текст введён", "expect": "сообщение отправлено"}
+{"action": "scroll", "amount": -500}
 {"action": "wait", "seconds": 2}
 {"action": "find_images", "query": "..."}
-{"action": "download", "url": "...", "filename": "..."}
+{"action": "download", "url": "...", "filename": "...", "expect": "файл скачан"}
 {"action": "read_page", "url": "..."}
-{"action": "save_screenshot", "filename": "shot.png"}
-{"action": "write_file", "filename": "notes.txt", "content": "..."}
+{"action": "save_screenshot", "filename": "shot.png", "expect": "файл сохранён"}
+{"action": "write_file", "filename": "notes.txt", "content": "...", "expect": "файл записан"}
 {"action": "ask_user", "question": "..."}
 {"action": "done", "summary": "что сделано"}
 
@@ -191,6 +219,29 @@ SYSTEM = """Ты Shiro Ai Agent и ты  управляешь Windows-компь
 8. Если click_text ответил «не найден», попробуй другую формулировку или другое действие.
 9. ask_user только если без ответа невозможно.
 10. Вызывай done только тогда, когда на экране виден результат задачи.
+11. Для каждого действия, кроме wait, ask_user и done, добавляй "expect": что должно быть видно на экране после действия. Для click_text, click, double_click_text, type, hotkey обязательно добавляй "precondition": что должно быть видно ДО действия.
+12. Если в истории есть «ПРОВЕРКА НЕ ПРОШЛА», «ПРОВЕРКА НЕ ВЫПОЛНЕНА», «ОТМЕНЕНО GUARD», «ОТМЕНЕНО ПРОВЕРКОЙ БЕЗОПАСНОСТИ» или «не указано условие», не вызывай done. Повтори действие с исправлением, выполни условие или выбери другой путь.
+"""
+
+VERIFY_SYSTEM = """Ты проверяешь, совпадает ли экран с ожидаемым результатом.
+Тебе дают ожидание и скриншот экрана ПОСЛЕ действия.
+Ответь ОДНИМ JSON-объектом без пояснений:
+{"ok": true, "reason": "коротко"}  — на экране видно то, что ожидалось
+{"ok": false, "reason": "коротко"} — ожидаемого не видно
+"""
+
+GUARD_SYSTEM = """Ты проверяешь, готов ли экран к следующему действию.
+Тебе дают условие и скриншот экрана ДО действия.
+Ответь ОДНИМ JSON-объектом без пояснений:
+{"ok": true, "reason": "коротко"}  — условие выполнено, действие можно делать
+{"ok": false, "reason": "коротко"} — условие не выполнено
+"""
+
+SAFETY_SYSTEM = """Ты оцениваешь безопасность действия на компьютере перед его выполнением.
+Тебе дают цель пользователя, предлагаемое действие и скриншот экрана ДО действия.
+Ответь ОДНИМ JSON-объектом без пояснений:
+{"ok": true, "reason": "коротко"}  — действие соответствует цели и не вредит (не удаляет данные, не отправляет чужим людям, не платит, не меняет системные настройки без необходимости)
+{"ok": false, "reason": "коротко"} — действие опасно, не относится к цели или может навредить
 """
 
 ALIASES = {
@@ -202,13 +253,84 @@ ALIASES = {
 }
 RISKY = ("удал", "delete", "отправ", "оплат", "перезапис", "format", "install", "установ")
 
+# ---------- action allowlist: schema for every allowed action ----------
+# Each entry: required fields and their types. Unknown actions and extra/missing/wrong-type fields are rejected.
+ACTION_SCHEMA = {
+    "open_app": {"name": str},
+    "open_url": {"url": str},
+    "click_text": {"text": str},
+    "double_click_text": {"text": str},
+    "click": {"x": int, "y": int},
+    "type": {"text": str},
+    "hotkey": {"keys": list},
+    "scroll": {"amount": int},
+    "wait": {"seconds": (int, float)},
+    "find_images": {"query": str},
+    "download": {"url": str, "filename": str},
+    "read_page": {"url": str},
+    "save_screenshot": {"filename": str},
+    "write_file": {"filename": str, "content": str},
+    "ask_user": {"question": str},
+    "done": {"summary": str},
+}
+# Optional fields that may appear next to the required ones
+OPTIONAL_FIELDS = {"expect", "precondition"}
+URL_PREFIXES = ("http://", "https://")
+MAX_TEXT = 5000
+
+
+def validate_action(a: dict):
+    """Returns (True, "") if the action is allowed, or (False, reason) if it must not run."""
+    if not isinstance(a, dict):
+        return False, "action is not an object"
+    kind = a.get("action")
+    if kind not in ACTION_SCHEMA:
+        return False, f"unknown action: {kind!r}"
+    schema = ACTION_SCHEMA[kind]
+    allowed = set(schema) | {"action"} | OPTIONAL_FIELDS
+    extra = set(a) - allowed
+    if extra:
+        return False, f"unexpected fields: {sorted(extra)}"
+    for field, ftype in schema.items():
+        if field not in a:
+            return False, f"missing field: {field}"
+        value = a[field]
+        if isinstance(value, bool) or not isinstance(value, ftype):
+            return False, f"wrong type for {field}"
+        if isinstance(value, str) and len(value) > MAX_TEXT:
+            return False, f"{field} is too long"
+    if kind == "open_url" and not a["url"].startswith(URL_PREFIXES):
+        return False, "url must start with http:// or https://"
+    if kind == "hotkey" and not (1 <= len(a["keys"]) <= 4 and all(isinstance(k, str) for k in a["keys"])):
+        return False, "keys must be a list of 1 to 4 strings"
+    if kind == "scroll" and not (-5000 <= a["amount"] <= 5000):
+        return False, "scroll amount out of range"
+    if kind == "wait" and not (0 <= a["seconds"] <= 60):
+        return False, "wait seconds out of range"
+    if kind in ("click", "double_click_text") and "x" in a:
+        if not (0 <= a["x"] <= 10000 and 0 <= a["y"] <= 10000):
+            return False, "coordinates out of range"
+    return True, ""
+
+
 STATE = {"busy": False, "stop": False, "question": None, "last": ""}
 ANSWER = {"text": ""}
 ANSWER_EVENT = threading.Event()
 TG_APP = {"app": None, "loop": None, "chat_id": None}
 
+# Actions that change the screen and therefore need a precondition and a guard
+CAN_GUARD = ("click", "click_text", "double_click_text", "type", "hotkey")
+# Actions that never need a check
+NO_CHECK = ("wait", "ask_user", "done")
+# Actions with side effects outside the screen: need a safety check even if it is not a screen action
+SIDE_EFFECT = ("download", "write_file", "save_screenshot", "open_app", "open_url")
+
 
 class StopRun(Exception):
+    pass
+
+
+class UnsafePath(Exception):
     pass
 
 
@@ -233,6 +355,19 @@ def ask(question: str) -> str:
     if STATE["stop"]:
         raise StopRun()
     return ANSWER["text"]
+
+
+# ---------- safe paths: only inside the Desktop folder ----------
+def safe_desktop_path(filename: str) -> Path:
+    """Returns a path inside the Desktop folder. Rejects any name with '..', separators or drive colons."""
+    name = str(filename or "").strip()
+    if not name or ".." in name or "/" in name or "\\" in name or ":" in name:
+        raise UnsafePath(t("path_bad"))
+    DESKTOP.mkdir(exist_ok=True)
+    path = (DESKTOP / name).resolve()
+    if path.parent != DESKTOP:
+        raise UnsafePath(t("path_bad"))
+    return path
 
 
 # ---------- Telegram ----------
@@ -489,6 +624,18 @@ def parse_action(text: str) -> dict:
     return action
 
 
+def call_with_retry(fn, tries: int = 3, wait: int = 10):
+    """Repeats a request when the provider is overloaded (HTTP 503)."""
+    for i in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if "503" not in str(e) or i == tries:
+                raise
+            out(t("retry").format(wait=wait, i=i, tries=tries))
+            time.sleep(wait)
+
+
 def ask_model(goal, history, shot_b64, w, h):
     prompt = build_prompt(goal, history, w, h)
 
@@ -563,7 +710,7 @@ def ask_model(goal, history, shot_b64, w, h):
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{shot_b64}"},
             })
-        resp = client.chat.completions.create(
+        resp = call_with_retry(lambda: client.chat.completions.create(
             model=SET["gemini_model"],
             messages=[
                 {"role": "system", "content": SYSTEM},
@@ -571,7 +718,7 @@ def ask_model(goal, history, shot_b64, w, h):
             ],
             temperature=0.1,
             max_tokens=600,
-        )
+        ))
         text = resp.choices[0].message.content or ""
         if not text.strip():
             raise ValueError("empty model response, try again")
@@ -580,9 +727,89 @@ def ask_model(goal, history, shot_b64, w, h):
         raise ValueError(f"Unknown provider: {SET['provider']}")
 
     action = parse_action(text)
+    if not isinstance(action, dict):
+        raise ValueError("model answer is not a JSON object")
     kind = action.get("action", "")
-    action["action"] = ALIASES.get(kind, kind)
+    if isinstance(kind, str):
+        action["action"] = ALIASES.get(kind, kind)
     return action
+
+
+def check_screen(system_prompt: str, condition: str, shot_b64: str, extra: str = ""):
+    """Asks the model a yes/no question about the screenshot.
+    Returns (True, reason), (False, reason), or (None, reason) if the check itself failed
+    or the model's answer is not a real boolean. None is never treated as success."""
+    prompt = f"{extra}Условие: {condition}\nОтветь JSON."
+    try:
+        if SET["provider"] == "ollama":
+            import ollama
+            client = ollama.Client(host=SET["ollama_host"])
+            resp = client.chat(
+                model=SET["ollama_model"],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt, "images": [shot_b64]},
+                ],
+                options={"temperature": 0},
+            )
+            text = resp["message"]["content"]
+        else:
+            from openai import OpenAI
+            if SET["provider"] == "gemini":
+                client = OpenAI(api_key=SET["gemini_key"], base_url=GEMINI_BASE_URL)
+                model = SET["gemini_model"]
+            elif SET["provider"] == "openai":
+                client = OpenAI(api_key=SET["openai_key"])
+                model = SET["openai_model"]
+            else:
+                from groq import Groq
+                client = Groq(api_key=SET["groq_key"])
+                model = SET["groq_model"]
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{shot_b64}"}},
+            ]
+            resp = call_with_retry(lambda: client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
+                ],
+                temperature=0,
+                max_tokens=200,
+            ))
+            text = resp.choices[0].message.content or ""
+
+        result = parse_action(text)
+        ok = result.get("ok")
+        if type(ok) is not bool:
+            return None, f"invalid boolean in model answer: {ok!r}"
+        return ok, str(result.get("reason", ""))
+    except Exception as e:
+        return None, f"check failed: {e}"
+
+
+def verify_expectation(expect: str, shot_b64: str):
+    """Checks the screen after the action against the expected result."""
+    if not expect or not shot_b64:
+        return None, "no expectation"
+    return check_screen(VERIFY_SYSTEM, f"Ожидание: {expect}", shot_b64)
+
+
+def guard_precondition(precondition: str, shot_b64: str):
+    """Checks the screen before the action against the required condition."""
+    if not precondition or not shot_b64:
+        return None, "no precondition"
+    return check_screen(GUARD_SYSTEM, precondition, shot_b64)
+
+
+def safety_check(goal: str, action: dict, shot_b64: str):
+    """Asks whether the action is safe and matches the user's goal, before it runs."""
+    if not shot_b64:
+        return None, "no screenshot"
+    desc = json.dumps(action, ensure_ascii=False)
+    extra = f"Цель пользователя: {goal}\nПредлагаемое действие: {desc}\n"
+    return check_screen(SAFETY_SYSTEM, "действие безопасно и соответствует цели", shot_b64, extra)
 
 
 # ---------- actions ----------
@@ -609,8 +836,7 @@ def read_page(url):
 
 
 def download(url, filename):
-    DESKTOP.mkdir(exist_ok=True)
-    path = DESKTOP / filename
+    path = safe_desktop_path(filename)
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     path.write_bytes(r.content)
@@ -668,7 +894,7 @@ def execute(a):
         return "scrolled"
 
     if k == "wait":
-        time.sleep(float(a.get("seconds", 1)))
+        time.sleep(float(a["seconds"]))
         return "waited"
 
     if k == "find_images":
@@ -681,18 +907,16 @@ def execute(a):
         return read_page(a["url"])
 
     if k == "save_screenshot":
-        DESKTOP.mkdir(exist_ok=True)
-        path = DESKTOP / a["filename"]
+        path = safe_desktop_path(a["filename"])
         pyautogui.screenshot().save(path)
         return f"screenshot saved: {path}"
 
     if k == "write_file":
-        DESKTOP.mkdir(exist_ok=True)
-        path = DESKTOP / a["filename"]
+        path = safe_desktop_path(a["filename"])
         path.write_text(a["content"], encoding="utf-8")
         return f"file written: {path}"
 
-    return f"unknown action '{k}', skipping"
+    raise ValueError(f"no handler for action {k!r}")
 
 
 def is_risky(a):
@@ -733,7 +957,9 @@ def run(goal):
     history = []
     last_key = None
     clicks_in_row = 0
-    CLICK_ACTIONS = ("click", "click_text", "double_click_text")
+    # True only when the last non-check action was confirmed by a verification.
+    # Every new action resets it, so done cannot reuse an old confirmation.
+    confirmed = None
 
     for step in range(1, MAX_STEPS + 1):
         if STATE["stop"]:
@@ -752,13 +978,21 @@ def run(goal):
 
         print(f"[{step}] {a}", flush=True)
 
+        # Strict allowlist check: anything not matching the schema is never executed
+        valid, why = validate_action(a)
+        if not valid:
+            print(f"  ⛔ {t('invalid_action')}: {why}", flush=True)
+            history.append(f"{json.dumps(a, ensure_ascii=False, default=str)} -> {t('invalid_action').upper()}: {why}")
+            continue
+
+        act = a["action"]
         key = json.dumps(a, ensure_ascii=False, sort_keys=True)
         if key == last_key:
             out(t("repeat"))
             return
         last_key = key
 
-        if a.get("action") in CLICK_ACTIONS:
+        if act in ("click", "click_text", "double_click_text"):
             clicks_in_row += 1
         else:
             clicks_in_row = 0
@@ -766,14 +1000,27 @@ def run(goal):
             out(t("clicks_stop"))
             return
 
-        if a.get("action") == "done":
+        if act == "done":
+            if SET["verify"]:
+                if confirmed is not True:
+                    print(f"  ✗ {t('done_rejected')}", flush=True)
+                    history.append(f"done отклонён: последнее действие не подтверждено проверкой. {t('done_rejected')}")
+                    continue
+            elif not SET["trust_done"]:
+                print(f"  ✗ {t('done_rejected')} (trust_done выключен)", flush=True)
+                history.append("done отклонён: проверка выключена, а trust_done не разрешён в конфиге.")
+                continue
             out(t("done") + a.get("summary", ""))
             return
 
-        if a.get("action") == "ask_user":
-            ans = ask(a.get("question", "?"))
-            history.append(f"asked «{a.get('question')}», answer: {ans}")
+        if act == "ask_user":
+            ans = ask(a["question"])
+            history.append(f"asked «{a['question']}», answer: {ans}")
+            confirmed = None  # new information from the user: earlier confirmation no longer counts
             continue
+
+        # Any new executable action must be confirmed again before done
+        confirmed = None
 
         if is_risky(a):
             ans = ask(f"{t('risky')} {json.dumps(a, ensure_ascii=False)}")
@@ -781,11 +1028,60 @@ def run(goal):
                 history.append(f"{t('cancelled')}: {a}")
                 continue
 
+        # Screen-changing actions need a precondition, otherwise they are not performed
+        if act in CAN_GUARD and not a.get("precondition"):
+            print(f"  ⛔ {t('no_precondition')}", flush=True)
+            history.append(f"{json.dumps(a, ensure_ascii=False)} -> {t('no_precondition').upper()}")
+            continue
+
+        # Safety check: mandatory when enabled. Without a screenshot it cannot run, so the action is blocked.
+        needs_safety = act in CAN_GUARD or act in SIDE_EFFECT
+        if SET["safety_guard"] and needs_safety:
+            if not shot:
+                print(f"  ⛔ {t('no_screenshot_for_safety')}", flush=True)
+                history.append(f"{json.dumps(a, ensure_ascii=False)} -> {t('no_screenshot_for_safety').upper()}")
+                continue
+            ok, reason = safety_check(goal, a, shot)
+            if ok is not True:
+                print(f"  ⛔ {t('safety_block')}: {reason}", flush=True)
+                history.append(
+                    f"{json.dumps(a, ensure_ascii=False)} -> {t('safety_block').upper()}: {reason}. Выбери другое действие."
+                )
+                continue
+
+        if SET["guard"] and SET["use_screenshot"] and act in CAN_GUARD:
+            ok, reason = guard_precondition(a["precondition"], shot)
+            if ok is not True:
+                print(f"  ⛔ {t('guard_block')}: {reason}", flush=True)
+                history.append(
+                    f"{json.dumps(a, ensure_ascii=False)} -> {t('guard_block').upper()}: "
+                    f"{reason}. Сначала выполни условие «{a['precondition']}»."
+                )
+                continue
+
         try:
             result = execute(a)
+        except UnsafePath as e:
+            result = f"error: {e}"
         except Exception as e:
             result = f"error: {e}"
         print(f"  → {result[:200]}", flush=True)
+
+        expect = a.get("expect", "")
+        if SET["verify"] and SET["use_screenshot"] and expect and act not in NO_CHECK:
+            time.sleep(1.5)
+            after_shot, _, _ = grab_screen()
+            ok, reason = verify_expectation(expect, after_shot)
+            confirmed = ok
+            if ok is True:
+                print(f"  ✓ {t('verify_ok')}: {reason}", flush=True)
+            elif ok is False:
+                print(f"  ✗ {t('verify_fail')}: {reason}", flush=True)
+                result = f"{result}; ПРОВЕРКА НЕ ПРОШЛА (ожидалось: {expect}; {reason}). Попробуй другой путь."
+            else:
+                print(f"  ? {t('verify_none')}: {reason}", flush=True)
+                result = f"{result}; ПРОВЕРКА НЕ ВЫПОЛНЕНА ({reason}). Не вызывай done, пока результат не подтверждён."
+
         history.append(f"{json.dumps(a, ensure_ascii=False)} -> {result[:500]}")
         time.sleep(1)
 
@@ -909,8 +1205,20 @@ def console_loop():
         handle_command(line)
 
 
-# ---------- web panel ----------
+# ---------- web panel (local only, token required for changes) ----------
 app = Flask(__name__)
+
+if not WEB_TOKEN:
+    WEB_TOKEN = secrets.token_urlsafe(16)
+    print(f"Web panel token (set web_token in config.yaml to keep it): {WEB_TOKEN}", flush=True)
+
+
+def _check_token():
+    """Changing requests need the token in the X-Token header."""
+    if request.headers.get("X-Token", "") != WEB_TOKEN:
+        return jsonify(error="forbidden"), 403
+    return None
+
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8">
@@ -928,6 +1236,7 @@ PAGE = """<!doctype html>
 </style></head><body>
 <h2>Agent control</h2>
 <div class="muted" id="currentModel"></div>
+<div class="row"><input id="token" class="grow" placeholder="Access token (from the console)" type="password"></div>
 
 <div class="row">
   <select id="provider">
@@ -959,6 +1268,14 @@ const $ = id => document.getElementById(id);
 let models = {ollama: [], groq: [], openai: [], gemini: []};
 let lastProvider = null;
 
+function post(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Token': $('token').value},
+    body: JSON.stringify(body || {})
+  });
+}
+
 async function load() {
   const s = await (await fetch('/api/state')).json();
   models = s.models;
@@ -975,11 +1292,8 @@ async function load() {
 }
 
 async function applySettings() {
-  await fetch('/api/settings', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: $('provider').value, model: $('model').value.trim()})
-  });
+  const r = await post('/api/settings', {provider: $('provider').value, model: $('model').value.trim()});
+  if (r.status === 403) alert('Wrong token.');
   lastProvider = null;
   load();
 }
@@ -987,29 +1301,24 @@ async function applySettings() {
 async function runTask() {
   const goal = $('goal').value.trim();
   if (!goal) return;
-  const r = await fetch('/api/task', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({goal})
-  });
+  const r = await post('/api/task', {goal});
+  if (r.status === 403) return alert('Wrong token.');
   if (r.status === 409) alert('Agent is busy. Press Stop or wait.');
   $('goal').value = '';
   load();
 }
 
 async function stopAgent() {
-  await fetch('/api/stop', {method: 'POST'});
+  const r = await post('/api/stop');
+  if (r.status === 403) alert('Wrong token.');
   load();
 }
 
 async function sendAnswer() {
   const text = $('answer').value;
   $('answer').value = '';
-  await fetch('/api/answer', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text})
-  });
+  const r = await post('/api/answer', {text});
+  if (r.status === 403) alert('Wrong token.');
   load();
 }
 
@@ -1050,6 +1359,9 @@ def api_state():
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
+    denied = _check_token()
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     set_model(provider=data.get("provider"), model=data.get("model"))
     return jsonify(ok=True, provider=SET["provider"], model=current_model())
@@ -1057,6 +1369,9 @@ def api_settings():
 
 @app.route("/api/task", methods=["POST"])
 def api_task():
+    denied = _check_token()
+    if denied:
+        return denied
     goal = (request.get_json(silent=True) or {}).get("goal", "").strip()
     if not goal:
         return jsonify(error="empty"), 400
@@ -1067,6 +1382,9 @@ def api_task():
 
 @app.route("/api/answer", methods=["POST"])
 def api_answer():
+    denied = _check_token()
+    if denied:
+        return denied
     ANSWER["text"] = (request.get_json(silent=True) or {}).get("text", "")
     ANSWER_EVENT.set()
     return jsonify(ok=True)
@@ -1074,12 +1392,15 @@ def api_answer():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
+    denied = _check_token()
+    if denied:
+        return denied
     stop_agent()
     return jsonify(ok=True)
 
 
 def run_web():
-    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
+    app.run(host="127.0.0.1", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

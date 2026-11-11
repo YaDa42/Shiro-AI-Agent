@@ -1,4 +1,8 @@
 llm:
+  verify: true
+  guard: true
+  safety_guard: true
+  trust_done: false
   provider: "PROVIDER"
   model: "OLLAMA_VISION_MODEL"
   host: "http://localhost:11434"
