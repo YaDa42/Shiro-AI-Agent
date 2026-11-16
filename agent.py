@@ -1109,7 +1109,7 @@ footer{margin-top:20px;color:#667187;font-size:11px;text-align:center}
 @media(max-width:800px){.layout{grid-template-columns:1fr}.wrap{padding:20px 14px}.top{align-items:flex-start}.pill{display:none}}
 @media(max-width:480px){.grid2{grid-template-columns:1fr}.card{padding:16px}h1{font-size:21px}}
 </style></head><body><main class="wrap">
-<header class="top"><div class="brand"><div class="logo">S</div><div><h1>Shiro Control Center</h1><div class="sub">Desktop agent · Control panel</div></div></div><div class="pill">FIVE BANANA · v5.0.0</div></header>
+<header class="top"><div class="brand"><div class="logo">S</div><div><h1>Shiro Control Center</h1><div class="sub">Desktop agent · Control panel</div></div></div><div class="pill">ICE CREAM · v6.0.0</div></header>
 <div class="layout"><section class="col">
 <div class="card"><div class="cardhead"><div><div class="eyebrow">01 / Control</div><h2>Run a task</h2></div><span class="small" id="modelNow">Loading model…</span></div>
 <div class="field"><label for="goal">WHAT SHOULD SHIRO DO?</label><input id="goal" placeholder="For example: open Notepad" autocomplete="off"></div>
