@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Shiro Setup</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+:root{--bg:#080a0f;--surface:#0f1218;--card:#131922;--border:#1e2a3a;--border-hi:#2d3f56;--text:#e8f0fb;--muted:#6b7f9a;--dim:#3a4e65;--green:#a3e635;--green-dim:#4a6a19;--cyan:#38bdf8;--cyan-dim:#0d3f5c;--amber:#fbbf24;--red:#f87171;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;font-size:14px;line-height:1.6;min-height:100vh}
+.shell{display:flex;min-height:100vh}
+.sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);padding:28px 0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#bef264,#22d3ee);display:grid;place-items:center;color:#0a1208;font-weight:800;font-size:17px;flex-shrink:0}
+.brand-name{font-size:15px;font-weight:700;letter-spacing:-.3px}.brand-sub{font-size:10px;color:var(--muted);margin-top:1px}
+.step-nav{display:flex;flex-direction:column;padding:0 12px;gap:2px;flex:1}
+.step-btn{display:flex;align-items:center;gap:10px;padding:9px 10px;border:none;background:transparent;color:var(--muted);cursor:pointer;border-radius:10px;font:inherit;font-size:13px;text-align:left;transition:background .15s,color .15s}
+.step-btn:hover{background:var(--card);color:var(--text)}.step-btn.active{background:#161f2e;color:var(--text)}.step-btn.done{color:var(--green)}
+.step-num{width:22px;height:22px;border-radius:50%;background:var(--border);display:grid;place-items:center;font-size:11px;font-weight:700;flex-shrink:0;color:var(--muted);transition:background .2s,color .2s}
+.step-btn.active .step-num{background:var(--green);color:#0d1a05}.step-btn.done .step-num{background:var(--green-dim);color:var(--green)}
+.sidebar-footer{padding:16px 20px 0;border-top:1px solid var(--border);margin-top:auto}
+.sidebar-footer p{font-size:11px;color:var(--dim);line-height:1.5}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 32px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.progress-track{flex:1;max-width:300px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--green);border-radius:2px;transition:width .4s cubic-bezier(.4,0,.2,1)}
+.topbar-status{font-size:12px;color:var(--muted)}
+.content{flex:1;padding:32px;display:grid;grid-template-columns:1fr 380px;gap:24px;align-content:start}
+.panel{display:none;flex-direction:column;gap:20px;grid-column:1}.panel.active{display:flex}
+.panel-head{margin-bottom:4px}.panel-head h2{font-size:20px;font-weight:700;letter-spacing:-.4px}.panel-head p{color:var(--muted);font-size:13px;margin-top:5px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px}
+/* Lang picker */
+.lang-picker{display:flex;gap:8px;margin-bottom:4px}
+.lang-btn{border:1.5px solid var(--border);border-radius:9px;padding:7px 18px;background:transparent;color:var(--muted);font:600 13px inherit;cursor:pointer;transition:all .15s}
+.lang-btn:hover{border-color:var(--border-hi);color:var(--text)}.lang-btn.active{border-color:var(--green);background:#111f0d;color:var(--green)}
+/* Providers */
+.provider-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.provider-opt{border:1.5px solid var(--border);border-radius:13px;padding:14px 16px;cursor:pointer;transition:border-color .15s,background .15s;display:flex;align-items:center;gap:12px}
+.provider-opt:hover{border-color:var(--border-hi);background:#0d1420}.provider-opt.selected{border-color:var(--green);background:#111f0d}
+.provider-icon{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;font-size:18px;flex-shrink:0}
+.provider-icon.ollama{background:#1a2a1a}.provider-icon.groq{background:#1a1a2a}.provider-icon.openai{background:#0d1f1f}.provider-icon.gemini{background:#1f1a0d}
+.provider-name{font-weight:600;font-size:14px}.provider-desc{font-size:11px;color:var(--muted);margin-top:2px}
+.field{display:flex;flex-direction:column;gap:6px}.field label{font-size:12px;color:var(--muted);font-weight:600}
+input[type=text],input[type=number],input[type=password],select{background:#090d14;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font:inherit;font-size:13px;outline:none;width:100%;transition:border-color .15s}
+input:focus,select:focus{border-color:var(--cyan)}
+.hint{font-size:11px;color:var(--dim);margin-top:2px}.hint a{color:var(--cyan);text-decoration:none}.hint a:hover{text-decoration:underline}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+.toggle-row:last-child{border-bottom:none;padding-bottom:0}
+.toggle-label{font-size:13px;font-weight:500}.toggle-desc{font-size:11px;color:var(--muted);margin-top:2px}
+.toggle{position:relative;width:40px;height:22px;flex-shrink:0}.toggle input{opacity:0;width:0;height:0}
+.toggle-track{position:absolute;inset:0;background:var(--border);border-radius:11px;cursor:pointer;transition:background .2s}
+.toggle input:checked+.toggle-track{background:var(--green)}
+.toggle-track::after{content:'';position:absolute;left:3px;top:3px;width:16px;height:16px;background:white;border-radius:50%;transition:transform .2s}
+.toggle input:checked+.toggle-track::after{transform:translateX(18px)}
+.range-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);gap:16px}
+.range-row:last-child{border-bottom:none}
+.range-label p{font-size:13px;font-weight:500}.range-label span{font-size:11px;color:var(--muted)}
+.range-controls{display:flex;align-items:center;gap:8px;flex-shrink:0}
+input[type=range]{width:120px;accent-color:var(--green)}
+.range-val{font:500 14px var(--mono);color:var(--green);min-width:28px;text-align:center}
+.btn{border:none;border-radius:10px;padding:10px 18px;font:600 13px inherit;cursor:pointer;transition:filter .15s,transform .15s}
+.btn:hover{filter:brightness(1.1);transform:translateY(-1px)}.btn:active{transform:translateY(0)}
+.btn-primary{background:var(--green);color:#0d1a05}.btn-secondary{background:#1a2435;color:var(--text);border:1px solid var(--border-hi)}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.nav-row{display:flex;justify-content:space-between;align-items:center;margin-top:4px}
+/* Preview */
+.preview-col{grid-column:2;grid-row:1/99;align-self:start;position:sticky;top:24px}
+.preview-card{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+.preview-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);background:#0d1118}
+.preview-title{font-size:12px;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:7px}
+.preview-title span{color:var(--cyan)}
+.preview-body{padding:16px;overflow-x:auto;max-height:70vh;overflow-y:auto}
+.preview-body pre{font:12.5px/1.6 var(--mono);white-space:pre;color:#c9d8f0}
+.y-key{color:#93c5fd}.y-str{color:#86efac}.y-num{color:#fcd34d}.y-bool{color:#f9a8d4}.y-comment{color:var(--muted)}.y-sec{color:var(--cyan);font-weight:600}
+.copy-btn{font-size:11px;padding:5px 10px;border-radius:7px}.copied{background:#1a4a1a!important;color:var(--green)!important}
+/* Boxes */
+.success-box{background:#0d1f0d;border:1px solid #2a4d2a;border-radius:13px;padding:18px;display:flex;gap:14px;align-items:flex-start}
+.success-icon{font-size:22px;flex-shrink:0}.success-text h3{font-size:14px;color:var(--green);margin-bottom:4px}
+.success-text p{font-size:12px;color:var(--muted);line-height:1.6}
+.warn-box{background:#1f1500;border:1px solid #4a3600;border-radius:11px;padding:12px 14px;font-size:12px;color:var(--amber);display:flex;gap:8px;align-items:flex-start}
+/* Model chips */
+.model-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.model-chip{background:#0d1a2a;border:1px solid var(--border-hi);border-radius:7px;padding:4px 10px;font-size:11px;font-family:var(--mono);cursor:pointer;color:var(--muted);transition:background .12s,color .12s,border-color .12s}
+.model-chip:hover{background:#1a2f47;color:var(--text);border-color:var(--cyan)}.model-chip.active{background:var(--cyan-dim);color:var(--cyan);border-color:var(--cyan)}
+/* Instructions */
+.instr-step{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--border)}
+.instr-step:last-child{border-bottom:none;padding-bottom:0}
+.instr-num{width:26px;height:26px;border-radius:50%;background:var(--green-dim);color:var(--green);font-weight:700;font-size:12px;display:grid;place-items:center;flex-shrink:0;margin-top:1px}
+.instr-body h4{font-size:13px;font-weight:600;margin-bottom:3px}
+.instr-body p,.instr-body li{font-size:12px;color:var(--muted);line-height:1.7}
+.instr-body ul{padding-left:16px}
+.code-pill{display:inline-block;background:#090d14;border:1px solid var(--border-hi);border-radius:6px;padding:1px 7px;font:12px var(--mono);color:var(--cyan)}
+@media(max-width:900px){.content{grid-template-columns:1fr}.preview-col{grid-column:1;grid-row:auto;position:static}.sidebar{display:none}.provider-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="sidebar">
+  <div class="brand">
+    <div class="logo">S</div>
+    <div><div class="brand-name">Shiro Setup</div><div class="brand-sub">config.yaml wizard</div></div>
+  </div>
+  <div class="step-nav">
+    <button class="step-btn active" data-step="1" onclick="goStep(1)"><span class="step-num">1</span> <span data-i18n="s1"></span></button>
+    <button class="step-btn" data-step="2" onclick="goStep(2)"><span class="step-num">2</span> <span data-i18n="s2"></span></button>
+    <button class="step-btn" data-step="3" onclick="goStep(3)"><span class="step-num">3</span> <span data-i18n="s3"></span></button>
+    <button class="step-btn" data-step="4" onclick="goStep(4)"><span class="step-num">4</span> <span data-i18n="s4"></span></button>
+    <button class="step-btn" data-step="5" onclick="goStep(5)"><span class="step-num">5</span> <span data-i18n="s5"></span></button>
+  </div>
+  <div class="sidebar-footer"><p data-i18n="sidebarNote"></p></div>
+</nav>
+
+<div class="main">
+  <div class="topbar">
+    <span class="topbar-status" id="stepLabel"></span>
+    <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:20%"></div></div>
+  </div>
+
+  <div class="content">
+
+    <!-- STEP 1 -->
+    <div class="panel active" id="step1">
+      <div class="panel-head">
+        <div class="lang-picker">
+          <button class="lang-btn" id="lbRU" onclick="setLang('ru')">🇷🇺 Русский</button>
+          <button class="lang-btn active" id="lbEN" onclick="setLang('en')">🇬🇧 English</button>
+        </div>
+        <h2 data-i18n="p1h"></h2>
+        <p data-i18n="p1d"></p>
+      </div>
+      <div class="card">
+        <div class="provider-grid">
+          <div class="provider-opt selected" id="opt-ollama" onclick="selectProvider('ollama')">
+            <div class="provider-icon ollama">🦙</div>
+            <div><div class="provider-name">Ollama</div><div class="provider-desc" data-i18n="ollDesc"></div></div>
+          </div>
+          <div class="provider-opt" id="opt-groq" onclick="selectProvider('groq')">
+            <div class="provider-icon groq">⚡</div>
+            <div><div class="provider-name">Groq</div><div class="provider-desc" data-i18n="groqDesc"></div></div>
+          </div>
+          <div class="provider-opt" id="opt-openai" onclick="selectProvider('openai')">
+            <div class="provider-icon openai">🤖</div>
+            <div><div class="provider-name">OpenAI</div><div class="provider-desc" data-i18n="oaiDesc"></div></div>
+          </div>
+          <div class="provider-opt" id="opt-gemini" onclick="selectProvider('gemini')">
+            <div class="provider-icon gemini">✨</div>
+            <div><div class="provider-name">Gemini</div><div class="provider-desc" data-i18n="gemDesc"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="modelCard-ollama">
+        <div class="field"><label data-i18n="ollamaHostL"></label><input type="text" id="ollamaHost" value="http://localhost:11434" oninput="updatePreview()"><div class="hint" data-i18n="ollamaHostH"></div></div>
+        <div class="field" style="margin-top:14px"><label data-i18n="modelL"></label><input type="text" id="ollamaModel" value="qwen2.5vl:3b" oninput="updatePreview()"><div class="hint"><span data-i18n="ollamaModelH"></span> <a href="https://ollama.com/search" target="_blank" data-i18n="browseLink"></a></div></div>
+        <div class="model-chips" id="ollamaChips">
+          <div class="model-chip active" onclick="pickOllama(this,'qwen2.5vl:3b')">qwen2.5vl:3b</div>
+          <div class="model-chip" onclick="pickOllama(this,'qwen2.5vl:7b')">qwen2.5vl:7b</div>
+          <div class="model-chip" onclick="pickOllama(this,'llama3.2-vision:11b')">llama3.2-vision:11b</div>
+          <div class="model-chip" onclick="pickOllama(this,'minicpm-v:8b')">minicpm-v:8b</div>
+        </div>
+      </div>
+      <div class="card" id="modelCard-groq" style="display:none">
+        <div class="field"><label data-i18n="modelL"></label><input type="text" id="groqModel" value="meta-llama/llama-4-scout-17b-16e-instruct" oninput="updatePreview()"></div>
+        <div class="model-chips">
+          <div class="model-chip active" onclick="pickModel('groqModel',this,'meta-llama/llama-4-scout-17b-16e-instruct')">llama-4-scout-17b</div>
+          <div class="model-chip" onclick="pickModel('groqModel',this,'meta-llama/llama-4-maverick-17b-128e-instruct')">llama-4-maverick-17b</div>
+          <div class="model-chip" onclick="pickModel('groqModel',this,'llama-3.3-70b-versatile')">llama-3.3-70b</div>
+        </div>
+      </div>
+      <div class="card" id="modelCard-openai" style="display:none">
+        <div class="field"><label data-i18n="modelL"></label><input type="text" id="openaiModel" value="gpt-4.1-mini" oninput="updatePreview()"></div>
+        <div class="model-chips">
+          <div class="model-chip active" onclick="pickModel('openaiModel',this,'gpt-4.1-mini')">gpt-4.1-mini</div>
+          <div class="model-chip" onclick="pickModel('openaiModel',this,'gpt-4o-mini')">gpt-4o-mini</div>
+          <div class="model-chip" onclick="pickModel('openaiModel',this,'gpt-4o')">gpt-4o</div>
+        </div>
+      </div>
+      <div class="card" id="modelCard-gemini" style="display:none">
+        <div class="field"><label data-i18n="modelL"></label><input type="text" id="geminiModel" value="gemini-2.0-flash" oninput="updatePreview()"></div>
+        <div class="model-chips">
+          <div class="model-chip active" onclick="pickModel('geminiModel',this,'gemini-2.0-flash')">gemini-2.0-flash</div>
+          <div class="model-chip" onclick="pickModel('geminiModel',this,'gemini-3.1-flash-lite')">gemini-3.1-flash-lite</div>
+        </div>
+      </div>
+      <div class="nav-row"><span></span><button class="btn btn-primary" onclick="goStep(2)"><span data-i18n="nextKeys"></span> →</button></div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div class="panel" id="step2">
+      <div class="panel-head"><h2 data-i18n="p2h"></h2><p data-i18n="p2d"></p></div>
+      <div class="card" id="keyCard-ollama">
+        <div class="success-box">
+          <span class="success-icon">🔓</span>
+          <div class="success-text"><h3 data-i18n="noKeyH"></h3><p data-i18n="noKeyD"></p></div>
+        </div>
+      </div>
+      <div class="card" id="keyCard-groq" style="display:none">
+        <div class="field"><label data-i18n="groqKeyL"></label><input type="password" id="groqKey" placeholder="gsk_..." oninput="updatePreview()"><div class="hint"><span data-i18n="groqKeyH"></span> <a href="https://console.groq.com/keys" target="_blank">console.groq.com →</a></div></div>
+        <div class="warn-box" style="margin-top:14px"><span>⚠️</span><span data-i18n="keyWarn"></span></div>
+      </div>
+      <div class="card" id="keyCard-openai" style="display:none">
+        <div class="field"><label data-i18n="oaiKeyL"></label><input type="password" id="openaiKey" placeholder="sk-..." oninput="updatePreview()"><div class="hint" data-i18n="oaiKeyH"></div></div>
+        <div class="warn-box" style="margin-top:14px"><span>⚠️</span><span data-i18n="keyWarn"></span></div>
+      </div>
+      <div class="card" id="keyCard-gemini" style="display:none">
+        <div class="field"><label data-i18n="gemKeyL"></label><input type="password" id="geminiKey" placeholder="AIza..." oninput="updatePreview()"><div class="hint"><span data-i18n="gemKeyH"></span> <a href="https://aistudio.google.com/app/apikey" target="_blank">aistudio.google.com →</a></div></div>
+        <div class="warn-box" style="margin-top:14px"><span>⚠️</span><span data-i18n="keyWarn"></span></div>
+      </div>
+      <div class="nav-row"><button class="btn btn-ghost" onclick="goStep(1)">← <span data-i18n="back"></span></button><button class="btn btn-primary" onclick="goStep(3)"><span data-i18n="nextAgent"></span> →</button></div>
+    </div>
+
+    <!-- STEP 3 -->
+    <div class="panel" id="step3">
+      <div class="panel-head"><h2 data-i18n="p3h"></h2><p data-i18n="p3d"></p></div>
+      <div class="card">
+        <div class="toggle-row">
+          <div><div class="toggle-label" data-i18n="screenshotL"></div><div class="toggle-desc" data-i18n="screenshotD"></div></div>
+          <label class="toggle"><input type="checkbox" id="useScreenshot" checked onchange="updatePreview()"><span class="toggle-track"></span></label>
+        </div>
+        <div class="range-row">
+          <div class="range-label"><p data-i18n="maxStepsL"></p><span data-i18n="maxStepsD"></span></div>
+          <div class="range-controls"><input type="range" id="maxSteps" min="5" max="50" value="25" oninput="syncRange()"><span class="range-val" id="maxStepsVal">25</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="field"><label data-i18n="portL"></label><input type="number" id="webPort" value="8000" min="1024" max="65535" oninput="updatePreview();updatePortHint()"><div class="hint"><span data-i18n="portH"></span> <span class="code-pill">http://localhost:<span id="portHint">8000</span></span></div></div>
+        <div class="field" style="margin-top:14px"><label data-i18n="hostL"></label><input type="text" id="webHost" value="127.0.0.1" readonly style="color:var(--dim)"><div class="hint" data-i18n="hostH"></div></div>
+      </div>
+      <div class="nav-row"><button class="btn btn-ghost" onclick="goStep(2)">← <span data-i18n="back"></span></button><button class="btn btn-primary" onclick="goStep(4)"><span data-i18n="nextTg"></span> →</button></div>
+    </div>
+
+    <!-- STEP 4 -->
+    <div class="panel" id="step4">
+      <div class="panel-head"><h2><span data-i18n="p4h"></span> <span style="color:var(--muted);font-weight:400;font-size:15px" data-i18n="optional"></span></h2><p data-i18n="p4d"></p></div>
+      <div class="card">
+        <div class="toggle-row">
+          <div><div class="toggle-label" data-i18n="tgEnableL"></div><div class="toggle-desc" data-i18n="tgEnableD"></div></div>
+          <label class="toggle"><input type="checkbox" id="tgEnabled" onchange="toggleTg()"><span class="toggle-track"></span></label>
+        </div>
+      </div>
+      <div id="tgFields" style="display:none;flex-direction:column;gap:16px">
+        <div class="card"><div class="field"><label data-i18n="tgTokenL"></label><input type="password" id="tgToken" placeholder="123456:ABC..." oninput="updatePreview()"><div class="hint"><span data-i18n="tgTokenH"></span> <a href="https://t.me/BotFather" target="_blank">@BotFather →</a></div></div></div>
+        <div class="card"><div class="field"><label data-i18n="tgOwnerL"></label><input type="number" id="tgOwner" placeholder="123456789" oninput="updatePreview()"><div class="hint"><span data-i18n="tgOwnerH"></span> <a href="https://t.me/userinfobot" target="_blank">@userinfobot →</a></div></div></div>
+      </div>
+      <div class="nav-row"><button class="btn btn-ghost" onclick="goStep(3)">← <span data-i18n="back"></span></button><button class="btn btn-primary" onclick="goStep(5)"><span data-i18n="nextSave"></span> →</button></div>
+    </div>
+
+    <!-- STEP 5 -->
+    <div class="panel" id="step5">
+      <div class="panel-head"><h2 data-i18n="p5h"></h2><p data-i18n="p5d"></p></div>
+      <div class="card">
+        <div class="success-box" style="margin-bottom:16px">
+          <span class="success-icon">✅</span>
+          <div class="success-text"><h3 data-i18n="readyH"></h3><p data-i18n="readyD"></p></div>
+        </div>
+        <div id="instrSteps"></div>
+      </div>
+      <div class="nav-row"><button class="btn btn-ghost" onclick="goStep(4)">← <span data-i18n="back"></span></button><button class="btn btn-primary" onclick="copyYaml()"><span data-i18n="copyBtn"></span></button></div>
+    </div>
+
+    <!-- Preview -->
+    <div class="preview-col">
+      <div class="preview-card">
+        <div class="preview-head">
+          <div class="preview-title">📄 <span>config.yaml</span> <span style="color:var(--dim);font-weight:400;font-size:10px" data-i18n="previewNote"></span></div>
+          <button class="btn btn-ghost copy-btn" id="copyBtn" onclick="copyYaml()" data-i18n="copyBtn"></button>
+        </div>
+        <div class="preview-body"><pre id="yamlPreview"></pre></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<script>
+const T = {
+  en: {
+    s1:'Provider', s2:'API keys', s3:'Agent', s4:'Telegram', s5:'Save',
+    sidebarNote:'Place <code style="font-family:var(--mono);font-size:10px;color:var(--cyan)">config.yaml</code> next to <code style="font-family:var(--mono);font-size:10px;color:var(--cyan)">agent.py</code>.',
+    p1h:'Choose your LLM provider', p1d:'Shiro can run on a local Ollama instance or connect to Groq, OpenAI, or Gemini.',
+    ollDesc:'Local · free · private', groqDesc:'Fast · API key', oaiDesc:'GPT-4o · paid', gemDesc:'Google · fast',
+    ollamaHostL:'Ollama host', ollamaHostH:'Default port for a local Ollama install.',
+    modelL:'Model name', ollamaModelH:'Must support vision for screenshot mode.', browseLink:'Browse models →',
+    nextKeys:'Next: API keys', p2h:'API keys', p2d:'Keys are written into config.yaml — keep the file private.',
+    noKeyH:'No key needed', noKeyD:'Ollama runs locally — no API key required. Make sure Ollama is running before starting Shiro.',
+    groqKeyL:'Groq API key', groqKeyH:'Get your free key at',
+    oaiKeyL:'OpenAI API key', oaiKeyH:'Or set the OPENAI_API_KEY environment variable instead.',
+    gemKeyL:'Gemini API key', gemKeyH:'Get a free key at',
+    keyWarn:'Stored in plain text. Never commit config.yaml to a public repo.',
+    back:'Back', nextAgent:'Next: Agent',
+    p3h:'Agent settings', p3d:'Tune how Shiro behaves and where the web panel runs.',
+    screenshotL:'Send screenshots to the model', screenshotD:'Lets the AI see the screen. Required for click_text to work reliably.',
+    maxStepsL:'Max steps per task', maxStepsD:'How many AI actions before Shiro stops automatically.',
+    portL:'Web panel port', portH:'Panel opens at',
+    hostL:'Web host', hostH:'Locked to localhost — the panel has no login.',
+    nextTg:'Next: Telegram',
+    p4h:'Telegram bot', optional:'— optional', p4d:'Control Shiro and receive screenshots from anywhere via Telegram.',
+    tgEnableL:'Enable Telegram bot', tgEnableD:"Leave off if you only need the console and web panel.",
+    tgTokenL:'Bot token', tgTokenH:'Create a bot with',
+    tgOwnerL:'Your Telegram user ID', tgOwnerH:'Get your numeric ID from',
+    nextSave:'Next: Save',
+    p5h:'How to run Shiro', p5d:'Copy the config, place it next to agent.py, then follow these steps.',
+    readyH:'Config is ready', readyD:'Click Copy on the right, save the text as config.yaml in the same folder as agent.py.',
+    copyBtn:'Copy config.yaml',
+    previewNote:'🔒 keys shown partially · full value is copied',
+    i1h:'Install dependencies', i1b:'In the folder with agent.py, run:',
+    i2hOllama:'Check Ollama is running', i2b:'Open a terminal and run:',
+    i2hCloud:'Cloud provider — no local setup',
+    i2bGroq:'Groq runs in the cloud — no local service needed.',
+    i2bOai:'OpenAI runs in the cloud — no local service needed.',
+    i2bGem:'Gemini runs in the cloud — no local service needed.',
+    i3h:'Start Shiro', i3b:'Run from the agent folder:',
+    i4h:'Open the web panel', i4b:'After startup, the control panel will be available at:',
+    i5h:'Telegram (optional)', i5b:'Send <b style="color:var(--text)">/start</b> to your bot in Telegram to activate it. The bot token and owner ID must be set in config.yaml.',
+    i5off:'Telegram is disabled — you skipped that step. You can enable it later by editing config.yaml.',
+    stepLabelFmt: (n,t) => `Step ${n} of 5 — ${t}`,
+  },
+  ru: {
+    s1:'Провайдер', s2:'API ключи', s3:'Агент', s4:'Telegram', s5:'Сохранить',
+    sidebarNote:'Положи <code style="font-family:var(--mono);font-size:10px;color:var(--cyan)">config.yaml</code> рядом с <code style="font-family:var(--mono);font-size:10px;color:var(--cyan)">agent.py</code>.',
+    p1h:'Выбери LLM провайдера', p1d:'Shiro умеет работать с локальным Ollama или подключаться к Groq, OpenAI, Gemini.',
+    ollDesc:'Локально · бесплатно · приватно', groqDesc:'Быстро · API ключ', oaiDesc:'GPT-4o · платно', gemDesc:'Google · быстро',
+    ollamaHostL:'Хост Ollama', ollamaHostH:'Порт по умолчанию для локального Ollama.',
+    modelL:'Название модели', ollamaModelH:'Должна поддерживать изображения для режима скриншота.', browseLink:'Смотреть модели →',
+    nextKeys:'Далее: API ключи', p2h:'API ключи', p2d:'Ключи записываются в config.yaml — храни файл в тайне.',
+    noKeyH:'Ключ не нужен', noKeyD:'Ollama работает локально — API ключ не требуется. Убедись, что Ollama запущена перед стартом Shiro.',
+    groqKeyL:'API ключ Groq', groqKeyH:'Получи бесплатный ключ на',
+    oaiKeyL:'API ключ OpenAI', oaiKeyH:'Или задай переменную окружения OPENAI_API_KEY.',
+    gemKeyL:'API ключ Gemini', gemKeyH:'Получи бесплатный ключ на',
+    keyWarn:'Хранится в открытом виде. Не добавляй config.yaml в публичный репозиторий.',
+    back:'Назад', nextAgent:'Далее: Агент',
+    p3h:'Настройки агента', p3d:'Как ведёт себя Shiro и где открывается веб-панель.',
+    screenshotL:'Отправлять скриншоты модели', screenshotD:'ИИ видит экран. Нужно для работы click_text.',
+    maxStepsL:'Макс. шагов на задачу', maxStepsD:'Сколько действий ИИ до автоматической остановки.',
+    portL:'Порт веб-панели', portH:'Панель откроется по адресу',
+    hostL:'Хост', hostH:'Только localhost — у панели нет авторизации.',
+    nextTg:'Далее: Telegram',
+    p4h:'Telegram бот', optional:'— необязательно', p4d:'Управляй Shiro и получай скриншоты из любого места через Telegram.',
+    tgEnableL:'Включить Telegram бота', tgEnableD:'Пропусти, если нужна только консоль и веб-панель.',
+    tgTokenL:'Токен бота', tgTokenH:'Создай бота через',
+    tgOwnerL:'Твой Telegram ID', tgOwnerH:'Узнай свой числовой ID через',
+    nextSave:'Далее: Сохранить',
+    p5h:'Как запустить Shiro', p5d:'Скопируй конфиг, положи рядом с agent.py и следуй инструкции.',
+    readyH:'Конфиг готов', readyD:'Нажми Копировать справа, сохрани текст как config.yaml в папку с agent.py.',
+    copyBtn:'Копировать config.yaml',
+    previewNote:'🔒 ключи скрыты · при копировании вставится полное значение',
+    i1h:'Установить зависимости', i1b:'В папке с agent.py выполни:',
+    i2hOllama:'Проверь, что Ollama запущена', i2b:'Открой терминал и выполни:',
+    i2hCloud:'Облачный провайдер — локальная настройка не нужна',
+    i2bGroq:'Groq работает в облаке — локальный сервис не нужен.',
+    i2bOai:'OpenAI работает в облаке — локальный сервис не нужен.',
+    i2bGem:'Gemini работает в облаке — локальный сервис не нужен.',
+    i3h:'Запусти Shiro', i3b:'Выполни из папки с агентом:',
+    i4h:'Открой веб-панель', i4b:'После запуска панель управления будет доступна по адресу:',
+    i5h:'Telegram (необязательно)', i5b:'Отправь <b style="color:var(--text)">/start</b> своему боту в Telegram, чтобы активировать его. Токен и owner_id должны быть заданы в config.yaml.',
+    i5off:'Telegram отключён — ты пропустил этот шаг. Можно включить позже, отредактировав config.yaml.',
+    stepLabelFmt: (n,t) => `Шаг ${n} из 5 — ${t}`,
+  }
+};
+
+let lang = 'en';
+let currentProvider = 'ollama';
+let tgOn = false;
+
+function t(k){ return T[lang][k] || k; }
+
+function setLang(l) {
+  lang = l;
+  document.getElementById('lbRU').classList.toggle('active', l==='ru');
+  document.getElementById('lbEN').classList.toggle('active', l==='en');
+  applyI18n();
+  updatePreview();
+  refreshStepLabel();
+}
+
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const k = el.getAttribute('data-i18n');
+    const v = T[lang][k];
+    if (v !== undefined) el.innerHTML = v;
+  });
+}
+
+function refreshStepLabel() {
+  const active = document.querySelector('.step-btn.active');
+  if (!active) return;
+  const n = parseInt(active.dataset.step);
+  document.getElementById('stepLabel').textContent = T[lang].stepLabelFmt(n, t('s'+n));
+}
+
+const STEP_COUNT = 5;
+function goStep(n) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('step'+n).classList.add('active');
+  document.querySelectorAll('.step-btn').forEach(b => {
+    const s = parseInt(b.dataset.step);
+    b.classList.remove('active','done');
+    if (s===n) b.classList.add('active');
+    else if (s<n) b.classList.add('done');
+  });
+  document.getElementById('progressFill').style.width = (n/STEP_COUNT*100)+'%';
+  refreshStepLabel();
+  if (n===5) buildInstructions();
+  updatePreview();
+}
+
+function selectProvider(p) {
+  currentProvider = p;
+  document.querySelectorAll('.provider-opt').forEach(el => el.classList.remove('selected'));
+  document.getElementById('opt-'+p).classList.add('selected');
+  ['ollama','groq','openai','gemini'].forEach(x => {
+    const mc = document.getElementById('modelCard-'+x);
+    const kc = document.getElementById('keyCard-'+x);
+    if(mc) mc.style.display = x===p?'':'none';
+    if(kc) kc.style.display = x===p?'':'none';
+  });
+  updatePreview();
+}
+
+function pickOllama(el,val) {
+  document.getElementById('ollamaModel').value = val;
+  document.querySelectorAll('#ollamaChips .model-chip').forEach(c=>c.classList.remove('active'));
+  el.classList.add('active'); updatePreview();
+}
+function pickModel(id,el,val) {
+  document.getElementById(id).value = val;
+  el.closest('.card').querySelectorAll('.model-chip').forEach(c=>c.classList.remove('active'));
+  el.classList.add('active'); updatePreview();
+}
+function syncRange() {
+  const v = document.getElementById('maxSteps').value;
+  document.getElementById('maxStepsVal').textContent = v; updatePreview();
+}
+function toggleTg() {
+  tgOn = document.getElementById('tgEnabled').checked;
+  document.getElementById('tgFields').style.display = tgOn?'flex':'none'; updatePreview();
+}
+function updatePortHint() {
+  document.getElementById('portHint').textContent = document.getElementById('webPort').value||8000;
+}
+function g(id){ const e=document.getElementById(id); return e?e.value.trim():''; }
+function gb(id){ const e=document.getElementById(id); return e?e.checked:false; }
+
+function buildData() {
+  return {
+    provider: currentProvider,
+    ollamaHost: g('ollamaHost')||'http://localhost:11434',
+    ollamaModel: g('ollamaModel')||'qwen2.5vl:3b',
+    groqModel: g('groqModel')||'meta-llama/llama-4-scout-17b-16e-instruct',
+    groqKey: g('groqKey'),
+    openaiModel: g('openaiModel')||'gpt-4.1-mini',
+    openaiKey: g('openaiKey'),
+    geminiModel: g('geminiModel')||'gemini-2.0-flash',
+    geminiKey: g('geminiKey'),
+    useScreenshot: gb('useScreenshot'),
+    maxSteps: parseInt(g('maxSteps'))||25,
+    webPort: parseInt(g('webPort'))||8000,
+    tgEnabled: tgOn,
+    tgToken: g('tgToken'),
+    tgOwner: g('tgOwner')||'0',
+  };
+}
+
+function mask(v){ return v?`"${v.slice(0,4)}${'·'.repeat(4)}"` :'""'; }
+function str(v){ return v?`"${v}"`:'""'; }
+
+function renderYaml(d) {
+  const bool = v=>v?'true':'false';
+  const L=[];
+  L.push(`<span class="y-comment"># Shiro AI Agent — config.yaml</span>`);
+  L.push('');
+  L.push(`<span class="y-sec">llm</span>:`);
+  L.push(`  <span class="y-key">provider</span>: <span class="y-str">"${d.provider}"</span>`);
+  L.push('');
+  if(d.provider==='ollama'){
+    L.push(`  <span class="y-comment"># Ollama (local)</span>`);
+    L.push(`  <span class="y-key">model</span>: <span class="y-str">"${d.ollamaModel}"</span>`);
+    L.push(`  <span class="y-key">host</span>: <span class="y-str">"${d.ollamaHost}"</span>`);
+  } else if(d.provider==='groq'){
+    L.push(`  <span class="y-comment"># Groq</span>`);
+    L.push(`  <span class="y-key">groq_model</span>: <span class="y-str">"${d.groqModel}"</span>`);
+    L.push(`  <span class="y-key">groq_api_key</span>: <span class="y-str">${mask(d.groqKey)}</span>`);
+    L.push(`  <span class="y-key">model</span>: <span class="y-str">"${d.ollamaModel}"</span>`);
+    L.push(`  <span class="y-key">host</span>: <span class="y-str">"${d.ollamaHost}"</span>`);
+  } else if(d.provider==='openai'){
+    L.push(`  <span class="y-comment"># OpenAI</span>`);
+    L.push(`  <span class="y-key">openai_model</span>: <span class="y-str">"${d.openaiModel}"</span>`);
+    L.push(`  <span class="y-key">openai_api_key</span>: <span class="y-str">${mask(d.openaiKey)}</span>`);
+    L.push(`  <span class="y-key">model</span>: <span class="y-str">"${d.ollamaModel}"</span>`);
+    L.push(`  <span class="y-key">host</span>: <span class="y-str">"${d.ollamaHost}"</span>`);
+  } else {
+    L.push(`  <span class="y-comment"># Gemini</span>`);
+    L.push(`  <span class="y-key">gemini_model</span>: <span class="y-str">"${d.geminiModel}"</span>`);
+    L.push(`  <span class="y-key">gemini_api_key</span>: <span class="y-str">${mask(d.geminiKey)}</span>`);
+    L.push(`  <span class="y-key">model</span>: <span class="y-str">"${d.ollamaModel}"</span>`);
+    L.push(`  <span class="y-key">host</span>: <span class="y-str">"${d.ollamaHost}"</span>`);
+  }
+  L.push(`  <span class="y-key">groq_model</span>: <span class="y-str">"${d.groqModel}"</span>`);
+  if(d.provider!=='groq') L.push(`  <span class="y-key">groq_api_key</span>: <span class="y-str">""</span>`);
+  if(d.provider!=='openai'){ L.push(`  <span class="y-key">openai_model</span>: <span class="y-str">"${d.openaiModel}"</span>`); L.push(`  <span class="y-key">openai_api_key</span>: <span class="y-str">""</span>`); }
+  if(d.provider!=='gemini'){ L.push(`  <span class="y-key">gemini_model</span>: <span class="y-str">"${d.geminiModel}"</span>`); L.push(`  <span class="y-key">gemini_api_key</span>: <span class="y-str">""</span>`); }
+  L.push(`  <span class="y-key">use_screenshot</span>: <span class="y-bool">${bool(d.useScreenshot)}</span>`);
+  L.push('');
+  L.push(`<span class="y-sec">agent</span>:`);
+  L.push(`  <span class="y-key">max_steps</span>: <span class="y-num">${d.maxSteps}</span>`);
+  L.push(`  <span class="y-key">web_host</span>: <span class="y-str">"127.0.0.1"</span>`);
+  L.push(`  <span class="y-key">web_port</span>: <span class="y-num">${d.webPort}</span>`);
+  L.push('');
+  L.push(`<span class="y-sec">telegram</span>:`);
+  if(d.tgEnabled && d.tgToken){
+    L.push(`  <span class="y-key">token</span>: <span class="y-str">${mask(d.tgToken)}</span>`);
+    L.push(`  <span class="y-key">owner_id</span>: <span class="y-num">${d.tgOwner||0}</span>`);
+  } else {
+    L.push(`  <span class="y-key">token</span>: <span class="y-str">""</span>  <span class="y-comment"># disabled</span>`);
+    L.push(`  <span class="y-key">owner_id</span>: <span class="y-num">0</span>`);
+  }
+  return L.join('\n');
+}
+
+function buildRawYaml(d) {
+  const bool=v=>v?'true':'false';
+  const L=[];
+  L.push('# Shiro AI Agent — config.yaml');
+  L.push('llm:');
+  L.push(`  provider: "${d.provider}"`);
+  L.push(`  model: "${d.ollamaModel}"`);
+  L.push(`  host: "${d.ollamaHost}"`);
+  L.push(`  groq_model: "${d.groqModel}"`);
+  L.push(`  groq_api_key: ${str(d.groqKey)}`);
+  L.push(`  openai_model: "${d.openaiModel}"`);
+  L.push(`  openai_api_key: ${str(d.openaiKey)}`);
+  L.push(`  gemini_model: "${d.geminiModel}"`);
+  L.push(`  gemini_api_key: ${str(d.geminiKey)}`);
+  L.push(`  use_screenshot: ${bool(d.useScreenshot)}`);
+  L.push('agent:');
+  L.push(`  max_steps: ${d.maxSteps}`);
+  L.push(`  web_host: "127.0.0.1"`);
+  L.push(`  web_port: ${d.webPort}`);
+  L.push('telegram:');
+  L.push(`  token: ${str(d.tgToken)}`);
+  L.push(`  owner_id: ${parseInt(d.tgOwner)||0}`);
+  return L.join('\n');
+}
+
+function updatePreview() {
+  const d = buildData();
+  document.getElementById('yamlPreview').innerHTML = renderYaml(d);
+}
+
+function step(num, titleKey, bodyHtml) {
+  return `<div class="instr-step"><div class="instr-num">${num}</div><div class="instr-body"><h4>${t(titleKey)}</h4>${bodyHtml}</div></div>`;
+}
+
+function buildInstructions() {
+  const d = buildData();
+  const url = `http://localhost:${d.webPort}`;
+  let html = '';
+
+  html += step(1, 'i1h',
+    `<p>${t('i1b')}</p><p style="margin-top:6px"><span class="code-pill">pip install flask pyyaml pyautogui pillow pyperclip requests python-telegram-bot uiautomation numpy</span></p>`
+  );
+
+  if(d.provider === 'ollama'){
+    html += step(2, 'i2hOllama',
+      `<p>${t('i2b')}</p><p style="margin-top:6px"><span class="code-pill">ollama serve</span></p><p style="margin-top:6px;color:var(--muted);font-size:12px">${t('ollamaModelH')} — <span class="code-pill">ollama pull ${d.ollamaModel}</span></p>`
+    );
+  } else {
+    const cloudKey = d.provider==='groq'?'i2bGroq':d.provider==='openai'?'i2bOai':'i2bGem';
+    html += step(2, 'i2hCloud', `<p>${t(cloudKey)}</p>`);
+  }
+
+  html += step(3, 'i3h',
+    `<p>${t('i3b')}</p><p style="margin-top:6px"><span class="code-pill">python agent.py</span></p>`
+  );
+
+  html += step(4, 'i4h',
+    `<p>${t('i4b')}</p><p style="margin-top:6px"><a href="${url}" target="_blank" class="code-pill" style="color:var(--cyan);text-decoration:none">${url}</a></p>`
+  );
+
+  const tgBody = (d.tgEnabled && d.tgToken)
+    ? `<p>${t('i5b')}</p>`
+    : `<p style="color:var(--dim)">${t('i5off')}</p>`;
+  html += step(5, 'i5h', tgBody);
+
+  document.getElementById('instrSteps').innerHTML = html;
+}
+
+function copyYaml() {
+  const yaml = buildRawYaml(buildData());
+  navigator.clipboard.writeText(yaml).catch(()=>{
+    const ta=document.createElement('textarea'); ta.value=yaml;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  }).then?.(()=>{});
+  const btn = document.getElementById('copyBtn');
+  const orig = btn.innerHTML;
+  btn.textContent = '✓';
+  btn.classList.add('copied');
+  setTimeout(()=>{ btn.innerHTML=orig; btn.classList.remove('copied'); }, 1800);
+}
+
+// Init
+selectProvider('ollama');
+applyI18n();
+updatePreview();
+refreshStepLabel();
+</script>
+</body>
+</html>

@@ -1,4 +1,6 @@
 import ctypes
+from ctypes import wintypes
+
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # real pixel coordinates at 125%/150% scaling
 except Exception:
@@ -6,6 +8,7 @@ except Exception:
 
 import asyncio, base64, io, json, logging, os, re, threading, time, urllib.parse, webbrowser, difflib, uuid
 from pathlib import Path
+from datetime import datetime, timedelta
 
 import numpy as np
 import pyautogui
@@ -13,15 +16,69 @@ import pyperclip
 import requests
 import uiautomation as auto
 import yaml
-import os
-import sys
-import time
-import threading
-from datetime import datetime
 from flask import Flask, jsonify, request, Response
 from PIL import ImageDraw
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+INPUT_MOUSE = 0
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def _screen_to_absolute(x: int, y: int):
+    """Переводит пиксели экрана в диапазон 0..65535, который требует SendInput."""
+    vx = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+    vy = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+    vw = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+    vh = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+    ax = int((x - vx) * 65535 / max(vw - 1, 1))
+    ay = int((y - vy) * 65535 / max(vh - 1, 1))
+    return ax, ay
+
+
+def raw_click(x: int, y: int, double: bool = False):
+    """Клик через SendInput с абсолютными координатами.
+    Работает там, где pyautogui не работает: игры с захватом мыши, полноэкранные окна, VM."""
+    ax, ay = _screen_to_absolute(x, y)
+    flags_move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+
+    def send(flags):
+        inp = INPUT(type=INPUT_MOUSE, u=_INPUTUNION(mi=MOUSEINPUT(ax, ay, 0, flags, 0, 0)))
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    send(flags_move)
+    time.sleep(0.05)
+    for _ in range(2 if double else 1):
+        send(MOUSEEVENTF_LEFTDOWN)
+        time.sleep(0.03)
+        send(MOUSEEVENTF_LEFTUP)
+        time.sleep(0.05)
+
 
 BASE = Path(__file__).parent
 cfg = yaml.safe_load(open(BASE / "config.yaml", encoding="utf-8"))
@@ -29,9 +86,11 @@ LLM = cfg["llm"]
 AG = cfg.get("agent", {})
 TG = cfg.get("telegram", {})
 MAX_STEPS = AG.get("max_steps", 25)
-WEB_HOST = AG.get("web_host", "127.0.0.1")
+# This release has no web login, so keep the control panel local-only.
+_CONFIGURED_WEB_HOST = str(AG.get("web_host", "127.0.0.1")).strip().lower()
+WEB_HOST = _CONFIGURED_WEB_HOST if _CONFIGURED_WEB_HOST in ("127.0.0.1", "localhost") else "127.0.0.1"
 WEB_PORT = AG.get("web_port", 8000)
-DESKTOP = (Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop").resolve()
+DESKTOP = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 TG_TOKEN = TG.get("token", "") or os.environ.get("TELEGRAM_TOKEN", "")
@@ -53,9 +112,9 @@ MESSAGES = {
         "stopping": "Stopping...",
         "stopped": "Stopped.",
         "done": "Done: ",
-        "done_rejected": "Done is not accepted: the last action was not confirmed. Continuing.",
         "step_limit": "Step limit reached.",
         "repeat": "The same action repeats, stopping.",
+        "clicks_stop": "Too many clicks in a row, stopping.",
         "ask_hint": "(answer in the console, the web panel or Telegram)",
         "web": "Web panel",
         "current": "Current",
@@ -75,18 +134,7 @@ MESSAGES = {
         "cancelled": "user cancelled",
         "error": "Error",
         "none_models": "(none, or Ollama is not running)",
-        "clicks_stop": "Four clicks in a row did nothing. Stopping. Check whether the input field is visible, or try a task that uses type without clicks.",
         "screenshot_failed": "screenshot not sent: ",
-        "retry": "Gemini is overloaded, waiting {wait} s and retrying ({i}/{tries})",
-        "verify_ok": "expectation met",
-        "verify_fail": "expectation not met",
-        "verify_none": "expectation not checked",
-        "guard_block": "action blocked by guard",
-        "safety_block": "action blocked by safety check",
-        "no_precondition": "precondition is missing, action not performed; ask the model to add it",
-        "no_screenshot_for_safety": "safety check needs a screenshot, action blocked",
-        "invalid_action": "invalid action, not performed",
-        "path_bad": "path is outside the Desktop folder or has a bad name",
         "tg_ready": "Telegram bot is running.",
         "tg_disabled": "Telegram bot is off: set telegram.token and telegram.owner_id in config.yaml.",
         "tg_denied": "Access denied: this bot only takes commands from its owner.",
@@ -105,9 +153,9 @@ MESSAGES = {
         "stopping": "Останавливаю...",
         "stopped": "Остановлено.",
         "done": "Готово: ",
-        "done_rejected": "Завершение не принято: последнее действие не подтверждено. Продолжаю.",
         "step_limit": "Лимит шагов исчерпан.",
         "repeat": "Одно и то же действие повторяется, останавливаюсь.",
+        "clicks_stop": "Слишком много кликов подряд, останавливаюсь.",
         "ask_hint": "(ответь в консоли, в веб-панели или в Telegram)",
         "web": "Веб-панель",
         "current": "Сейчас",
@@ -127,18 +175,7 @@ MESSAGES = {
         "cancelled": "пользователь отменил",
         "error": "Ошибка",
         "none_models": "(нет или Ollama не запущена)",
-        "clicks_stop": "Четыре клика подряд ничего не дали. Останавливаюсь. Проверь, видно ли поле ввода, или попробуй задачу с type без кликов.",
         "screenshot_failed": "скриншот не отправлен: ",
-        "retry": "Gemini перегружен, жду {wait} сек и пробую снова ({i}/{tries})",
-        "verify_ok": "ожидание выполнено",
-        "verify_fail": "ожидание не выполнено",
-        "verify_none": "ожидание не проверено",
-        "guard_block": "действие заблокировано guard",
-        "safety_block": "действие заблокировано проверкой безопасности",
-        "no_precondition": "не указано условие (precondition), действие не выполнено; модели нужно его добавить",
-        "no_screenshot_for_safety": "для проверки безопасности нужен скриншот, действие заблокировано",
-        "invalid_action": "некорректное действие, не выполнено",
-        "path_bad": "путь вне папки Desktop или недопустимое имя файла",
         "tg_ready": "Telegram-бот запущен.",
         "tg_disabled": "Telegram-бот выключен: задай telegram.token и telegram.owner_id в config.yaml.",
         "tg_denied": "Доступ запрещён: бот принимает команды только от владельца.",
@@ -169,7 +206,7 @@ OPENAI_PRESETS = [
 
 GEMINI_PRESETS = [
     "gemini-2.0-flash",
-    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
 ]
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -185,67 +222,42 @@ SET = {
     "gemini_model": LLM.get("gemini_model", GEMINI_PRESETS[0]),
     "gemini_key": os.environ.get("GEMINI_API_KEY", LLM.get("gemini_api_key", "")),
     "use_screenshot": LLM.get("use_screenshot", True),
-    "verify": LLM.get("verify", True),
-    "guard": LLM.get("guard", True),
-    "safety_guard": LLM.get("safety_guard", False),
-    # If true, done is accepted without a confirmed check. Off by default.
-    "trust_done": LLM.get("trust_done", False),
 }
 
-SYSTEM = """Ты управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
+SYSTEM = """Ты Shiro Ai Agent и ты управляешь Windows-компьютером. Выполняй задачу сам, шаг за шагом.
 Ответ — ОДИН JSON-объект, без пояснений и без текста после него. Допустимые действия:
 
-{"action": "open_app", "name": "paint", "expect": "окно Paint открыто"}
-{"action": "open_url", "url": "https://...", "expect": "страница загружена"}
-{"action": "click_text", "text": "Сохранить", "precondition": "диалог открыт", "expect": "диалог сохранения открыт"}
-{"action": "double_click_text", "text": "Файл", "precondition": "...", "expect": "..."}
-{"action": "click", "x": 100, "y": 200, "precondition": "...", "expect": "..."}  координаты с сетки (для полей и иконок без подписи)
-{"action": "type", "text": "...", "precondition": "поле ввода активно", "expect": "текст виден в поле"}
-{"action": "hotkey", "keys": ["enter"], "precondition": "текст введён", "expect": "сообщение отправлено"}
-{"action": "scroll", "amount": -500}
+{"action": "open_app", "name": "paint"}              открыть приложение через меню Пуск
+{"action": "open_url", "url": "https://..."}         открыть страницу в браузере
+{"action": "click_text", "text": "Сохранить"}        клик по тексту на экране (координаты находит программа)
+{"action": "double_click_text", "text": "Файл"}      двойной клик по тексту
+{"action": "click", "x": 100, "y": 200}              клик по координатам с сетки (только если click_text ответил «не найден»)
+{"action": "type", "text": "..."}                    напечатать текст в активное окно
+{"action": "hotkey", "keys": ["enter"]}              нажать клавишу или сочетание
+{"action": "scroll", "amount": -500}                 отрицательное = вниз
 {"action": "wait", "seconds": 2}
 {"action": "find_images", "query": "..."}
-{"action": "download", "url": "...", "filename": "...", "expect": "файл скачан"}
+{"action": "download", "url": "...", "filename": "..."}
 {"action": "read_page", "url": "..."}
-{"action": "save_screenshot", "filename": "shot.png", "expect": "файл сохранён"}
-{"action": "write_file", "filename": "notes.txt", "content": "...", "expect": "файл записан"}
+{"action": "save_screenshot", "filename": "shot.png"}
+{"action": "write_file", "filename": "notes.txt", "content": "..."}
 {"action": "ask_user", "question": "..."}
 {"action": "done", "summary": "что сделано"}
 
 Правила:
-1. Не спрашивай, если задача понятна.
-2. Сначала открой нужное приложение или сайт (open_app / open_url), потом действуй в нём.
-3. Печатай в поле только текст, который пользователь попросил написать. Текст команды (например, «напиши в ChatGPT ...») в поле не вставляй.
-4. Чтобы напечатать в поле ввода: если поле уже активно после открытия страницы, сразу используй type без клика. Иначе нажми на него (click_text по подписи поля, а если подписи нет, click по координатам с сетки), затем type.
-5. Чтобы отправить сообщение: после ввода текста вызови hotkey ["enter"].
-6. После каждого действия смотри следующий скриншот. Если поле не получило текст или страница не изменилась, не повторяй тот же клик больше двух раз.
-7. Для кнопок, ссылок и пунктов меню используй click_text и точно копируй текст с экрана. Координаты для них не придумывай.
-8. Если click_text ответил «не найден», попробуй другую формулировку или другое действие.
+0. Если задача говорит, что что-то уже настроено или установлено, не открывай настройки и не ищи установку.
+   Сразу найди нужную кнопку на экране (например «Запустить») и нажми её через click_text.
+1. Если на экране есть подпись нужного элемента, ВСЕГДА используй click_text (или double_click_text) с точным текстом с экрана.
+   Координаты в этом случае не указывай.
+2. click по координатам разрешён ТОЛЬКО после того, как click_text ответил «не найден».
+3. Не спрашивай, если задача понятна.
+4. Сначала открой нужное приложение или сайт (open_app / open_url), потом действуй в нём.
+5. Печатай в поле только текст, который пользователь попросил написать.
+6. Чтобы напечатать в поле ввода: если поле уже активно, сразу type. Иначе нажми на него через click_text, затем type.
+7. Чтобы отправить сообщение: после ввода текста вызови hotkey ["enter"].
+8. Если страница не изменилась после клика, не повторяй тот же клик больше двух раз.
 9. ask_user только если без ответа невозможно.
 10. Вызывай done только тогда, когда на экране виден результат задачи.
-11. Для каждого действия, кроме wait, ask_user и done, добавляй "expect": что должно быть видно на экране после действия. Для click_text, click, double_click_text, type, hotkey обязательно добавляй "precondition": что должно быть видно ДО действия.
-12. Если в истории есть «ПРОВЕРКА НЕ ПРОШЛА», «ПРОВЕРКА НЕ ВЫПОЛНЕНА», «ОТМЕНЕНО GUARD», «ОТМЕНЕНО ПРОВЕРКОЙ БЕЗОПАСНОСТИ» или «не указано условие», не вызывай done. Повтори действие с исправлением, выполни условие или выбери другой путь.
-"""
-
-VERIFY_SYSTEM = """Ты проверяешь, совпадает ли экран с ожидаемым результатом.
-Тебе дают ожидание и скриншот экрана ПОСЛЕ действия.
-Ответь ОДНИМ JSON-объектом без пояснений:
-{"ok": true, "reason": "коротко"}  — на экране видно то, что ожидалось
-{"ok": false, "reason": "коротко"} — ожидаемого не видно
-"""
-
-GUARD_SYSTEM = """Ты проверяешь, готов ли экран к следующему действию.
-Тебе дают условие и скриншот экрана ДО действия.
-Ответь ОДНИМ JSON-объектом без пояснений:
-{"ok": true, "reason": "коротко"}  — условие выполнено, действие можно делать
-{"ok": false, "reason": "коротко"} — условие не выполнено
-"""
-
-SAFETY_SYSTEM = """Ты оцениваешь безопасность действия на компьютере перед его выполнением.
-Тебе дают цель пользователя, предлагаемое действие и скриншот экрана ДО действия.
-Ответь ОДНИМ JSON-объектом без пояснений:
-{"ok": true, "reason": "коротко"}  — действие соответствует цели и не вредит (не удаляет данные, не отправляет чужим людям, не платит, не меняет системные настройки без необходимости)
-{"ok": false, "reason": "коротко"} — действие опасно, не относится к цели или может навредить
 """
 
 ALIASES = {
@@ -257,76 +269,16 @@ ALIASES = {
 }
 RISKY = ("удал", "delete", "отправ", "оплат", "перезапис", "format", "install", "установ")
 
-# ---------- action allowlist: schema for every allowed action ----------
-# Each entry: required fields and their types. Unknown actions and extra/missing/wrong-type fields are rejected.
-ACTION_SCHEMA = {
-    "open_app": {"name": str},
-    "open_url": {"url": str},
-    "click_text": {"text": str},
-    "double_click_text": {"text": str},
-    "click": {"x": int, "y": int},
-    "type": {"text": str},
-    "hotkey": {"keys": list},
-    "scroll": {"amount": int},
-    "wait": {"seconds": (int, float)},
-    "find_images": {"query": str},
-    "download": {"url": str, "filename": str},
-    "read_page": {"url": str},
-    "save_screenshot": {"filename": str},
-    "write_file": {"filename": str, "content": str},
-    "ask_user": {"question": str},
-    "done": {"summary": str},
-}
-# Optional fields that may appear next to the required ones
-OPTIONAL_FIELDS = {"expect", "precondition"}
-URL_PREFIXES = ("http://", "https://")
-MAX_TEXT = 5000
-
-
-def validate_action(a: dict):
-    """Returns (True, "") if the action is allowed, or (False, reason) if it must not run."""
-    if not isinstance(a, dict):
-        return False, "action is not an object"
-    kind = a.get("action")
-    if kind not in ACTION_SCHEMA:
-        return False, f"unknown action: {kind!r}"
-    schema = ACTION_SCHEMA[kind]
-    allowed = set(schema) | {"action"} | OPTIONAL_FIELDS
-    extra = set(a) - allowed
-    if extra:
-        return False, f"unexpected fields: {sorted(extra)}"
-    for field, ftype in schema.items():
-        if field not in a:
-            return False, f"missing field: {field}"
-        value = a[field]
-        if isinstance(value, bool) or not isinstance(value, ftype):
-            return False, f"wrong type for {field}"
-        if isinstance(value, str) and len(value) > MAX_TEXT:
-            return False, f"{field} is too long"
-    if kind == "open_url" and not a["url"].startswith(URL_PREFIXES):
-        return False, "url must start with http:// or https://"
-    if kind == "hotkey" and not (1 <= len(a["keys"]) <= 4 and all(isinstance(k, str) for k in a["keys"])):
-        return False, "keys must be a list of 1 to 4 strings"
-    if kind == "scroll" and not (-5000 <= a["amount"] <= 5000):
-        return False, "scroll amount out of range"
-    if kind == "wait" and not (0 <= a["seconds"] <= 60):
-        return False, "wait seconds out of range"
-    if kind in ("click", "double_click_text") and "x" in a:
-        if not (0 <= a["x"] <= 10000 and 0 <= a["y"] <= 10000):
-            return False, "coordinates out of range"
-    return True, ""
-
-
 STATE = {"busy": False, "stop": False, "question": None, "last": ""}
 ANSWER = {"text": ""}
 ANSWER_EVENT = threading.Event()
 TG_APP = {"app": None, "loop": None, "chat_id": None}
 
-
-# ---------- scheduler ----------
+# Scheduled tasks are stored next to agent.py and use the computer's local time.
 SCHEDULE_FILE = BASE / "scheduled_tasks.json"
 SCHEDULE_LOCK = threading.RLock()
 SCHEDULES = []
+
 
 def load_schedules():
     global SCHEDULES
@@ -336,8 +288,9 @@ def load_schedules():
     except FileNotFoundError:
         SCHEDULES = []
     except Exception as e:
-        print(f"Scheduler: could not load schedule file: {e}", flush=True)
+        print(f"Could not load scheduled tasks: {e}", flush=True)
         SCHEDULES = []
+
 
 def save_schedules():
     with SCHEDULE_LOCK:
@@ -345,57 +298,77 @@ def save_schedules():
         temp.write_text(json.dumps(SCHEDULES, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(SCHEDULE_FILE)
 
+
+def schedule_task(goal: str, run_at: str):
+    goal = (goal or "").strip()
+    if not goal:
+        raise ValueError("Task description is empty.")
+    when = datetime.fromisoformat(run_at)
+    if when <= datetime.now():
+        raise ValueError("Choose a time in the future.")
+    item = {
+        "id": uuid.uuid4().hex[:12],
+        "goal": goal[:1000],
+        "run_at": when.isoformat(timespec="minutes"),
+        "status": "pending",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with SCHEDULE_LOCK:
+        SCHEDULES.append(item)
+        SCHEDULES.sort(key=lambda x: x.get("run_at", ""))
+        save_schedules()
+    return item
+
+
+def delete_schedule(task_id: str) -> bool:
+    with SCHEDULE_LOCK:
+        before = len(SCHEDULES)
+        SCHEDULES[:] = [x for x in SCHEDULES if x.get("id") != task_id]
+        changed = len(SCHEDULES) != before
+        if changed:
+            save_schedules()
+        return changed
+
+
 def scheduler_loop():
     while True:
-        now = datetime.now()
         due = None
+        now = datetime.now()
         with SCHEDULE_LOCK:
             for item in SCHEDULES:
-                if item.get("enabled", True):
+                if item.get("status") == "pending":
                     try:
-                        when = datetime.fromisoformat(item["run_at"])
+                        if datetime.fromisoformat(item["run_at"]) <= now:
+                            due = item
+                            break
                     except Exception:
-                        item["enabled"] = False
-                        continue
-                    if when <= now:
-                        due = item
-                        break
-            if due:
-                if STATE["busy"]:
-                    due["run_at"] = (now + timedelta(minutes=1)).isoformat(timespec="minutes")
-                    due["last_result"] = "Отложено: Shiro был занят"
-                    save_schedules()
-                    due = None
-                else:
-                    due["enabled"] = False
-                    due["last_result"] = "Запускается"
-                    save_schedules()
+                        item["status"] = "invalid"
+                        save_schedules()
         if due:
-            goal = str(due.get("goal", "")).strip()
-            if goal:
-                started = start_goal(goal)
+            if STATE["busy"]:
+                # Do not lose a scheduled task when another task is running.
                 with SCHEDULE_LOCK:
-                    due["last_result"] = "Запущено" if started else "Не удалось запустить"
+                    due["run_at"] = (datetime.now().replace(second=0, microsecond=0)
+                                     + timedelta(minutes=1)).isoformat(timespec="minutes")
+                    save_schedules()
+            elif start_goal(due["goal"]):
+                with SCHEDULE_LOCK:
+                    due["status"] = "started"
+                    due["started_at"] = datetime.now().isoformat(timespec="seconds")
                     save_schedules()
         time.sleep(1)
+
 
 def start_scheduler():
     load_schedules()
     threading.Thread(target=scheduler_loop, daemon=True, name="ShiroScheduler").start()
-
-# Actions that change the screen and therefore need a precondition and a guard
-CAN_GUARD = ("click", "click_text", "double_click_text", "type", "hotkey")
-# Actions that never need a check
-NO_CHECK = ("wait", "ask_user", "done")
-# Actions with side effects outside the screen: need a safety check even if it is not a screen action
-SIDE_EFFECT = ("download", "write_file", "save_screenshot", "open_app", "open_url")
 
 
 class StopRun(Exception):
     pass
 
 
-class UnsafePath(Exception):
+class TextNotFound(Exception):
     pass
 
 
@@ -420,19 +393,6 @@ def ask(question: str) -> str:
     if STATE["stop"]:
         raise StopRun()
     return ANSWER["text"]
-
-
-# ---------- safe paths: only inside the Desktop folder ----------
-def safe_desktop_path(filename: str) -> Path:
-    """Returns a path inside the Desktop folder. Rejects any name with '..', separators or drive colons."""
-    name = str(filename or "").strip()
-    if not name or ".." in name or "/" in name or "\\" in name or ":" in name:
-        raise UnsafePath(t("path_bad"))
-    DESKTOP.mkdir(exist_ok=True)
-    path = (DESKTOP / name).resolve()
-    if path.parent != DESKTOP:
-        raise UnsafePath(t("path_bad"))
-    return path
 
 
 # ---------- Telegram ----------
@@ -525,15 +485,9 @@ def grab_screen():
     return base64.b64encode(buf.getvalue()).decode(), real_w, real_h
 
 
-# ---------- finding text on screen ----------
+# ---------- finding text on screen (UIA first, then OCR) ----------
 def _norm(s: str) -> str:
     return re.sub(r"[^\w]", "", (s or "").lower())
-
-
-def _word_hit(w: str, words: set) -> bool:
-    if w in words:
-        return True
-    return len(w) >= 3 and any(len(x) >= 3 and (w in x or x in w) for x in words)
 
 
 def _score(target: str, name: str) -> float:
@@ -546,12 +500,7 @@ def _score(target: str, name: str) -> float:
         return 0.95
     if len(nn) >= 3 and nn in tn:
         return 0.85
-    t_words = [_norm(w) for w in re.split(r"\s+", target.lower()) if _norm(w)]
-    n_words = {_norm(w) for w in re.split(r"\s+", name.lower()) if _norm(w)}
-    word_score = 0.0
-    if t_words and n_words:
-        word_score = sum(_word_hit(w, n_words) for w in t_words) / len(t_words) * 0.9
-    return max(word_score, difflib.SequenceMatcher(None, tn, nn).ratio())
+    return difflib.SequenceMatcher(None, tn, nn).ratio()
 
 
 def _key(score: float, name: str):
@@ -578,6 +527,7 @@ def _line_point(target: str, line: str, box):
 
 
 def _uia_candidate(text: str, max_nodes: int = 6000):
+    """Ищет элемент с нужной подписью через UI Automation. Работает в обычных окнах."""
     try:
         with auto.UIAutomationInitializerInThread():
             root = auto.GetForegroundControl()
@@ -633,18 +583,22 @@ def _ocr_candidate(text: str):
     return None
 
 
-def find_text(text: str):
-    cands = []
+def find_text_screen(text: str):
+    """UIA сначала (точные координаты), если нет уверенного совпадения, OCR по скриншоту."""
     uia = _uia_candidate(text)
+    if uia and uia[0] >= 0.95:
+        return uia[1], uia[2], f"{uia[3]} ({uia[0]:.2f})"
+
+    cands = []
     if uia:
         cands.append(uia)
-    if not uia or uia[0] < 0.95:
-        try:
-            ocr = _ocr_candidate(text)
-            if ocr:
-                cands.append(ocr)
-        except Exception as e:
-            out(f"OCR unavailable: {e}")
+    try:
+        ocr = _ocr_candidate(text)
+        if ocr:
+            cands.append(ocr)
+    except Exception as e:
+        out(f"OCR unavailable: {e}")
+
     if not cands:
         return None
     best = max(cands, key=lambda c: c[0])
@@ -687,18 +641,6 @@ def parse_action(text: str) -> dict:
         raise ValueError(f"model returned no JSON: {text}")
     action, _ = json.JSONDecoder().raw_decode(text[start:])
     return action
-
-
-def call_with_retry(fn, tries: int = 3, wait: int = 10):
-    """Repeats a request when the provider is overloaded (HTTP 503)."""
-    for i in range(1, tries + 1):
-        try:
-            return fn()
-        except Exception as e:
-            if "503" not in str(e) or i == tries:
-                raise
-            out(t("retry").format(wait=wait, i=i, tries=tries))
-            time.sleep(wait)
 
 
 def ask_model(goal, history, shot_b64, w, h):
@@ -775,7 +717,7 @@ def ask_model(goal, history, shot_b64, w, h):
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{shot_b64}"},
             })
-        resp = call_with_retry(lambda: client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=SET["gemini_model"],
             messages=[
                 {"role": "system", "content": SYSTEM},
@@ -783,7 +725,7 @@ def ask_model(goal, history, shot_b64, w, h):
             ],
             temperature=0.1,
             max_tokens=600,
-        ))
+        )
         text = resp.choices[0].message.content or ""
         if not text.strip():
             raise ValueError("empty model response, try again")
@@ -792,89 +734,9 @@ def ask_model(goal, history, shot_b64, w, h):
         raise ValueError(f"Unknown provider: {SET['provider']}")
 
     action = parse_action(text)
-    if not isinstance(action, dict):
-        raise ValueError("model answer is not a JSON object")
     kind = action.get("action", "")
-    if isinstance(kind, str):
-        action["action"] = ALIASES.get(kind, kind)
+    action["action"] = ALIASES.get(kind, kind)
     return action
-
-
-def check_screen(system_prompt: str, condition: str, shot_b64: str, extra: str = ""):
-    """Asks the model a yes/no question about the screenshot.
-    Returns (True, reason), (False, reason), or (None, reason) if the check itself failed
-    or the model's answer is not a real boolean. None is never treated as success."""
-    prompt = f"{extra}Условие: {condition}\nОтветь JSON."
-    try:
-        if SET["provider"] == "ollama":
-            import ollama
-            client = ollama.Client(host=SET["ollama_host"])
-            resp = client.chat(
-                model=SET["ollama_model"],
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt, "images": [shot_b64]},
-                ],
-                options={"temperature": 0},
-            )
-            text = resp["message"]["content"]
-        else:
-            from openai import OpenAI
-            if SET["provider"] == "gemini":
-                client = OpenAI(api_key=SET["gemini_key"], base_url=GEMINI_BASE_URL)
-                model = SET["gemini_model"]
-            elif SET["provider"] == "openai":
-                client = OpenAI(api_key=SET["openai_key"])
-                model = SET["openai_model"]
-            else:
-                from groq import Groq
-                client = Groq(api_key=SET["groq_key"])
-                model = SET["groq_model"]
-            content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{shot_b64}"}},
-            ]
-            resp = call_with_retry(lambda: client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": content},
-                ],
-                temperature=0,
-                max_tokens=200,
-            ))
-            text = resp.choices[0].message.content or ""
-
-        result = parse_action(text)
-        ok = result.get("ok")
-        if type(ok) is not bool:
-            return None, f"invalid boolean in model answer: {ok!r}"
-        return ok, str(result.get("reason", ""))
-    except Exception as e:
-        return None, f"check failed: {e}"
-
-
-def verify_expectation(expect: str, shot_b64: str):
-    """Checks the screen after the action against the expected result."""
-    if not expect or not shot_b64:
-        return None, "no expectation"
-    return check_screen(VERIFY_SYSTEM, f"Ожидание: {expect}", shot_b64)
-
-
-def guard_precondition(precondition: str, shot_b64: str):
-    """Checks the screen before the action against the required condition."""
-    if not precondition or not shot_b64:
-        return None, "no precondition"
-    return check_screen(GUARD_SYSTEM, precondition, shot_b64)
-
-
-def safety_check(goal: str, action: dict, shot_b64: str):
-    """Asks whether the action is safe and matches the user's goal, before it runs."""
-    if not shot_b64:
-        return None, "no screenshot"
-    desc = json.dumps(action, ensure_ascii=False)
-    extra = f"Цель пользователя: {goal}\nПредлагаемое действие: {desc}\n"
-    return check_screen(SAFETY_SYSTEM, "действие безопасно и соответствует цели", shot_b64, extra)
 
 
 # ---------- actions ----------
@@ -901,7 +763,8 @@ def read_page(url):
 
 
 def download(url, filename):
-    path = safe_desktop_path(filename)
+    DESKTOP.mkdir(exist_ok=True)
+    path = DESKTOP / filename
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     path.write_bytes(r.content)
@@ -926,21 +789,16 @@ def execute(a):
         return "page opened"
 
     if k in ("click_text", "double_click_text"):
-        found = find_text(a["text"])
+        found = find_text_screen(a["text"])
         if not found:
-            return f"'{a['text']}': {t('not_found')}"
+            raise TextNotFound(a["text"])
         x, y, how = found
-        pyautogui.moveTo(x, y, duration=0.3)
-        if k == "click_text":
-            pyautogui.click(x, y)
-        else:
-            pyautogui.doubleClick(x, y)
+        raw_click(x, y, double=(k == "double_click_text"))
         return f"{t('clicked')} '{a['text']}' ({x}, {y}), {how}"
 
     if k == "click":
         x, y = int(a["x"]), int(a["y"])
-        pyautogui.moveTo(x, y, duration=0.3)
-        pyautogui.click(x, y)
+        raw_click(x, y)
         return f"clicked ({x}, {y})"
 
     if k == "type":
@@ -959,7 +817,7 @@ def execute(a):
         return "scrolled"
 
     if k == "wait":
-        time.sleep(float(a["seconds"]))
+        time.sleep(float(a.get("seconds", 1)))
         return "waited"
 
     if k == "find_images":
@@ -972,16 +830,18 @@ def execute(a):
         return read_page(a["url"])
 
     if k == "save_screenshot":
-        path = safe_desktop_path(a["filename"])
+        DESKTOP.mkdir(exist_ok=True)
+        path = DESKTOP / a["filename"]
         pyautogui.screenshot().save(path)
         return f"screenshot saved: {path}"
 
     if k == "write_file":
-        path = safe_desktop_path(a["filename"])
+        DESKTOP.mkdir(exist_ok=True)
+        path = DESKTOP / a["filename"]
         path.write_text(a["content"], encoding="utf-8")
         return f"file written: {path}"
 
-    raise ValueError(f"no handler for action {k!r}")
+    return f"unknown action '{k}', skipping"
 
 
 def is_risky(a):
@@ -1022,9 +882,10 @@ def run(goal):
     history = []
     last_key = None
     clicks_in_row = 0
-    # True only when the last non-check action was confirmed by a verification.
-    # Every new action resets it, so done cannot reuse an old confirmation.
-    confirmed = None
+    # Координаты разрешены только после того, как click_text не нашёл текст.
+    text_tried = False    # был хоть один click_text / double_click_text в этом запуске
+    text_missing = False  # последний click_text / double_click_text не нашёл текст
+    CLICK_ACTIONS = ("click", "click_text", "double_click_text")
 
     for step in range(1, MAX_STEPS + 1):
         if STATE["stop"]:
@@ -1042,22 +903,23 @@ def run(goal):
             return
 
         print(f"[{step}] {a}", flush=True)
+        kind = a.get("action", "")
 
-        # Strict allowlist check: anything not matching the schema is never executed
-        valid, why = validate_action(a)
-        if not valid:
-            print(f"  ⛔ {t('invalid_action')}: {why}", flush=True)
-            history.append(f"{json.dumps(a, ensure_ascii=False, default=str)} -> {t('invalid_action').upper()}: {why}")
+        # Жёсткая проверка: координаты без предварительного «не найден» не выполняются
+        if kind == "click" and not (text_tried and text_missing):
+            msg = "click по координатам запрещён: сначала click_text по подписи, координаты только если текст не найден"
+            print(f"  ⛔ {msg}", flush=True)
+            history.append(f"{json.dumps(a, ensure_ascii=False)} -> ЗАБЛОКИРОВАНО: {msg}")
+            time.sleep(0.5)
             continue
 
-        act = a["action"]
         key = json.dumps(a, ensure_ascii=False, sort_keys=True)
         if key == last_key:
             out(t("repeat"))
             return
         last_key = key
 
-        if act in ("click", "click_text", "double_click_text"):
+        if kind in CLICK_ACTIONS:
             clicks_in_row += 1
         else:
             clicks_in_row = 0
@@ -1065,27 +927,14 @@ def run(goal):
             out(t("clicks_stop"))
             return
 
-        if act == "done":
-            if SET["verify"]:
-                if confirmed is not True:
-                    print(f"  ✗ {t('done_rejected')}", flush=True)
-                    history.append(f"done отклонён: последнее действие не подтверждено проверкой. {t('done_rejected')}")
-                    continue
-            elif not SET["trust_done"]:
-                print(f"  ✗ {t('done_rejected')} (trust_done выключен)", flush=True)
-                history.append("done отклонён: проверка выключена, а trust_done не разрешён в конфиге.")
-                continue
+        if kind == "done":
             out(t("done") + a.get("summary", ""))
             return
 
-        if act == "ask_user":
-            ans = ask(a["question"])
-            history.append(f"asked «{a['question']}», answer: {ans}")
-            confirmed = None  # new information from the user: earlier confirmation no longer counts
+        if kind == "ask_user":
+            ans = ask(a.get("question", "?"))
+            history.append(f"asked «{a.get('question')}», answer: {ans}")
             continue
-
-        # Any new executable action must be confirmed again before done
-        confirmed = None
 
         if is_risky(a):
             ans = ask(f"{t('risky')} {json.dumps(a, ensure_ascii=False)}")
@@ -1093,60 +942,19 @@ def run(goal):
                 history.append(f"{t('cancelled')}: {a}")
                 continue
 
-        # Screen-changing actions need a precondition, otherwise they are not performed
-        if act in CAN_GUARD and not a.get("precondition"):
-            print(f"  ⛔ {t('no_precondition')}", flush=True)
-            history.append(f"{json.dumps(a, ensure_ascii=False)} -> {t('no_precondition').upper()}")
-            continue
-
-        # Safety check: mandatory when enabled. Without a screenshot it cannot run, so the action is blocked.
-        needs_safety = act in CAN_GUARD or act in SIDE_EFFECT
-        if SET["safety_guard"] and needs_safety:
-            if not shot:
-                print(f"  ⛔ {t('no_screenshot_for_safety')}", flush=True)
-                history.append(f"{json.dumps(a, ensure_ascii=False)} -> {t('no_screenshot_for_safety').upper()}")
-                continue
-            ok, reason = safety_check(goal, a, shot)
-            if ok is not True:
-                print(f"  ⛔ {t('safety_block')}: {reason}", flush=True)
-                history.append(
-                    f"{json.dumps(a, ensure_ascii=False)} -> {t('safety_block').upper()}: {reason}. Выбери другое действие."
-                )
-                continue
-
-        if SET["guard"] and SET["use_screenshot"] and act in CAN_GUARD:
-            ok, reason = guard_precondition(a["precondition"], shot)
-            if ok is not True:
-                print(f"  ⛔ {t('guard_block')}: {reason}", flush=True)
-                history.append(
-                    f"{json.dumps(a, ensure_ascii=False)} -> {t('guard_block').upper()}: "
-                    f"{reason}. Сначала выполни условие «{a['precondition']}»."
-                )
-                continue
-
         try:
             result = execute(a)
-        except UnsafePath as e:
-            result = f"error: {e}"
+            if kind in ("click_text", "double_click_text"):
+                text_tried = True
+                text_missing = False
+        except TextNotFound:
+            text_tried = True
+            text_missing = True
+            result = f"'{a['text']}': {t('not_found')}. Используй click по координатам."
         except Exception as e:
             result = f"error: {e}"
+
         print(f"  → {result[:200]}", flush=True)
-
-        expect = a.get("expect", "")
-        if SET["verify"] and SET["use_screenshot"] and expect and act not in NO_CHECK:
-            time.sleep(1.5)
-            after_shot, _, _ = grab_screen()
-            ok, reason = verify_expectation(expect, after_shot)
-            confirmed = ok
-            if ok is True:
-                print(f"  ✓ {t('verify_ok')}: {reason}", flush=True)
-            elif ok is False:
-                print(f"  ✗ {t('verify_fail')}: {reason}", flush=True)
-                result = f"{result}; ПРОВЕРКА НЕ ПРОШЛА (ожидалось: {expect}; {reason}). Попробуй другой путь."
-            else:
-                print(f"  ? {t('verify_none')}: {reason}", flush=True)
-                result = f"{result}; ПРОВЕРКА НЕ ВЫПОЛНЕНА ({reason}). Не вызывай done, пока результат не подтверждён."
-
         history.append(f"{json.dumps(a, ensure_ascii=False)} -> {result[:500]}")
         time.sleep(1)
 
@@ -1270,63 +1078,78 @@ def console_loop():
         handle_command(line)
 
 
-# ---------- web panel (localhost only, no token login) ----------
+# ---------- web panel ----------
 app = Flask(__name__)
 
-PAGE = """<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Shiro Control Center</title>
 <style>
-:root{color-scheme:dark;--bg:#090d18;--panel:#111a2b;--panel2:#172238;--line:#263650;--muted:#91a1bb;--text:#edf3ff;--accent:#8b7cff;--cyan:#4dd9d0;--red:#ff647c;--green:#50d6a0}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#20204b 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,Segoe UI,sans-serif}
-.wrap{max-width:1180px;margin:auto;padding:30px 22px 60px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px}
-.brand{display:flex;align-items:center;gap:13px}.logo{width:48px;height:48px;border-radius:15px;background:linear-gradient(135deg,var(--accent),var(--cyan));display:grid;place-items:center;font-size:25px;font-weight:900;color:#07111d;box-shadow:0 8px 30px #766bff55}
-h1{font-size:25px;margin:0;letter-spacing:-.7px}.sub{color:var(--muted);font-size:13px;margin-top:3px}.pill{border:1px solid var(--line);background:#111a2b;padding:8px 13px;border-radius:99px;color:var(--muted);font-size:12px}
-.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}.card{background:linear-gradient(160deg,#151f33,#101827);border:1px solid var(--line);border-radius:19px;padding:20px;box-shadow:0 14px 35px #0002}
-.card h2{font-size:16px;margin:0 0 16px}.wide{grid-column:1/-1}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-input,select{width:100%;min-width:0;background:#0b1322;border:1px solid #30415e;border-radius:11px;padding:12px 13px;color:var(--text);font:inherit;outline:none}
-input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px #8b7cff22}.grow{flex:1}.field{flex:1;min-width:180px}
-button{border:0;border-radius:11px;padding:11px 16px;font:700 13px system-ui;cursor:pointer;color:#08111e;background:linear-gradient(135deg,var(--cyan),#8ce6d0);transition:.15s}
-button:hover{filter:brightness(1.1);transform:translateY(-1px)}button.secondary{background:#263653;color:var(--text)}button.stop{background:#4a2435;color:#ff9eae}button.purple{background:linear-gradient(135deg,#9b8cff,#6b91ff)}
-.status{margin-top:15px;border:1px solid var(--line);border-radius:13px;padding:14px;background:#0b1322;min-height:55px;color:#c8d5eb;white-space:pre-wrap}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:8px}.dot.busy{background:#ffc66d;box-shadow:0 0 12px #ffc66d88}
-.question{display:none;margin-top:12px;padding:14px;border-radius:13px;background:#332b19;border:1px solid #66502b}.question p{margin:0 0 10px;color:#ffda9c}
-.schedule-list{display:grid;gap:10px;margin-top:15px}.schedule{display:flex;justify-content:space-between;gap:12px;align-items:center;background:#0b1322;border:1px solid var(--line);padding:13px;border-radius:13px}.schedule strong{display:block;font-size:14px}.schedule small{display:block;color:var(--muted);margin-top:4px}.empty{color:var(--muted);padding:16px;text-align:center;border:1px dashed var(--line);border-radius:12px}
-@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.wrap{padding:20px 14px}.top{align-items:flex-start;flex-direction:column}.schedule{align-items:flex-start;flex-direction:column}}
+:root{color-scheme:dark;--bg:#0b0d12;--panel:#131722;--line:#283247;--text:#edf2fb;--muted:#91a0b8;--green:#a3e635;--cyan:#67e8f9;--red:#fb7185}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#1a2740 0,transparent 42%),var(--bg);color:var(--text);font:15px/1.5 Inter,Segoe UI,system-ui,sans-serif}
+.wrap{max-width:1180px;margin:auto;padding:30px 22px 60px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:28px}
+.brand{display:flex;align-items:center;gap:14px}.logo{width:48px;height:48px;border-radius:15px;background:linear-gradient(135deg,#bef264,#22d3ee);display:grid;place-items:center;color:#10151b;font-weight:900;font-size:24px}
+h1{font-size:25px;margin:0;letter-spacing:-.7px}.sub,.small{color:var(--muted);font-size:12px}.pill{border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--muted);font-size:12px}
+.layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.85fr);gap:18px}.col{display:grid;gap:18px;align-content:start}
+.card{background:linear-gradient(145deg,#171d29,#111620);border:1px solid var(--line);border-radius:19px;padding:21px;box-shadow:0 14px 35px #0003}
+.cardhead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.card h2{font-size:16px;margin:0}.eyebrow{font-size:11px;color:var(--green);font-weight:800;letter-spacing:1.3px;text-transform:uppercase}
+.field{display:grid;gap:7px;margin:12px 0}.field label{font-size:12px;color:var(--muted);font-weight:650}
+input,select{width:100%;background:#0c111a;color:var(--text);border:1px solid #30394a;border-radius:11px;padding:12px 13px;font:inherit;outline:none;min-width:0}
+input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px #67e8f91a}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:15px}
+button{border:0;border-radius:11px;padding:11px 16px;font:700 13px system-ui,sans-serif;cursor:pointer;transition:transform .15s,filter .15s}
+button:hover{filter:brightness(1.1);transform:translateY(-1px)}button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.primary{background:var(--green);color:#17200b}.secondary{background:#263247;color:var(--text);border:1px solid #35435a}.danger{background:#4a202b;color:#fecdd3;border:1px solid #713344}.cyan{background:#123b48;color:#a5f3fc;border:1px solid #1d5967}
+.status{background:#0c111a;border:1px solid var(--line);border-radius:13px;padding:14px;min-height:74px;white-space:pre-wrap;overflow-wrap:anywhere}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:8px}.dot.busy{background:#fbbf24;box-shadow:0 0 12px #fbbf2466}
+.schedule-list{display:grid;gap:9px}.schedule{display:flex;justify-content:space-between;align-items:center;gap:12px;background:#0d131d;border:1px solid var(--line);border-radius:12px;padding:12px}
+.schedule-main{min-width:0}.schedule-goal{font-weight:650;overflow-wrap:anywhere}.schedule-time{font-size:12px;color:var(--cyan);margin-top:3px}.tag{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--green)}
+.answerbox{display:none;margin-top:14px;padding:14px;border:1px solid #795b25;background:#2a2111;border-radius:13px}.answerbox p{margin:0 0 10px;color:#fcd78b}
+footer{margin-top:20px;color:#667187;font-size:11px;text-align:center}
+@media(max-width:800px){.layout{grid-template-columns:1fr}.wrap{padding:20px 14px}.top{align-items:flex-start}.pill{display:none}}
+@media(max-width:480px){.grid2{grid-template-columns:1fr}.card{padding:16px}h1{font-size:21px}}
 </style></head><body><main class="wrap">
-<header class="top"><div class="brand"><div class="logo">S</div><div><h1>Shiro Control Center</h1><div class="sub">Five Banana · Desktop Agent</div></div></div><div class="pill" id="clock">LOCAL TIME</div></header>
-<div class="grid">
-<section class="card"><h2>⚡ Управление агентом</h2>
-<div class="row"><div class="field"><label class="sub">Провайдер</label><select id="provider"><option value="ollama">Ollama</option><option value="groq">Groq</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
-<div class="field"><label class="sub">Модель</label><input id="model" list="models" placeholder="Название модели"><datalist id="models"></datalist></div><button class="secondary" onclick="applySettings()">Применить</button></div>
-<div class="row" style="margin-top:15px"><input id="goal" class="grow" placeholder="Например: открой блокнот"><button class="purple" onclick="runTask()">Запустить</button><button class="stop" onclick="stopAgent()">Стоп</button></div>
-<div class="status" id="status"><span class="dot"></span>Подключение...</div>
-<div class="question" id="question"><p id="qtext"></p><div class="row"><input id="answer" class="grow" placeholder="Ответ Shiro"><button onclick="sendAnswer()">Ответить</button></div></div>
-</section>
-<section class="card"><h2>🧠 Состояние</h2><div class="status" id="state">Загрузка...</div><p class="sub">Панель доступна только на этом компьютере через localhost.</p></section>
-<section class="card wide"><h2>⏰ Планировщик</h2>
-<div class="row"><div class="field"><label class="sub">Задача для Shiro</label><input id="scheduleGoal" placeholder="Например: открой браузер"></div><div class="field"><label class="sub">Дата и время запуска (локальное время ПК)</label><input id="scheduleTime" type="datetime-local"></div><button onclick="addSchedule()">Добавить</button></div>
-<div class="schedule-list" id="schedules"><div class="empty">Пока нет запланированных задач</div></div>
-</section></div></main>
+<header class="top"><div class="brand"><div class="logo">S</div><div><h1>Shiro Control Center</h1><div class="sub">Desktop agent · Control panel</div></div></div><div class="pill">FIVE BANANA · v5.0.0</div></header>
+<div class="layout"><section class="col">
+<div class="card"><div class="cardhead"><div><div class="eyebrow">01 / Control</div><h2>Run a task</h2></div><span class="small" id="modelNow">Loading model…</span></div>
+<div class="field"><label for="goal">WHAT SHOULD SHIRO DO?</label><input id="goal" placeholder="For example: open Notepad" autocomplete="off"></div>
+<div class="actions"><button class="primary" id="runBtn" onclick="runTask()">▶ Run task</button><button class="danger" onclick="stopAgent()">■ Stop agent</button></div>
+<div class="field"><label>AGENT STATUS</label><div class="status"><span id="dot" class="dot"></span><span id="status">Connecting…</span></div></div>
+<div class="answerbox" id="answerBox"><p id="questionText"></p><div class="grid2"><input id="answer" placeholder="Type your answer"><button class="cyan" onclick="sendAnswer()">Send answer</button></div></div></div>
+<div class="card"><div class="cardhead"><div><div class="eyebrow">02 / Scheduler</div><h2>Schedule a task</h2></div><span class="small">Local computer time</span></div>
+<div class="field"><label for="scheduledGoal">TASK</label><input id="scheduledGoal" placeholder="For example: open the browser"></div>
+<div class="field"><label for="runAt">DATE AND TIME</label><input id="runAt" type="datetime-local"></div>
+<div class="actions"><button class="primary" onclick="addSchedule()">＋ Schedule task</button></div><div class="small" id="scheduleMessage" style="margin-top:10px"></div></div>
+<div class="card"><div class="cardhead"><div><div class="eyebrow">03 / Queue</div><h2>Scheduled tasks</h2></div><span class="small" id="scheduleCount">0 tasks</span></div><div class="schedule-list" id="scheduleList"><div class="small">No scheduled tasks yet.</div></div></div>
+</section><aside class="col">
+<div class="card"><div class="cardhead"><div><div class="eyebrow">04 / Configuration</div><h2>Model settings</h2></div></div>
+<div class="field"><label for="provider">PROVIDER</label><select id="provider"><option value="ollama">Ollama · Local</option><option value="groq">Groq</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
+<div class="field"><label for="model">MODEL</label><input id="model" list="models" placeholder="Model name"><datalist id="models"></datalist></div>
+<button class="secondary" onclick="applySettings()">Apply settings</button><div class="small" id="settingsMessage" style="margin-top:10px"></div></div>
+<div class="card"><div class="eyebrow">Quick note</div><h2 style="margin:5px 0 8px">Shiro is ready.</h2><p class="small">Scheduled tasks start automatically while Shiro is running. If another task is active at the scheduled time, the scheduled task waits and retries shortly after.</p><p class="small">This build has no web-panel token login. Keep the panel on localhost and do not expose it to an untrusted network.</p></div>
+</aside></div><footer>SHIRO AI AGENT · FIVE BANANA</footer></main>
 <script>
 const $=id=>document.getElementById(id);let models={ollama:[],groq:[],openai:[],gemini:[]};let lastProvider=null;
-async function api(url,body){const opts=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};const r=await fetch(url,opts);let data={};try{data=await r.json()}catch{}if(!r.ok)throw Error(data.error||('HTTP '+r.status));return data}
-function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function load(){try{const s=await api('/api/state');models=s.models||models;$('status').innerHTML='<span class="dot '+(s.busy?'busy':'')+'"></span>'+(s.busy?'Shiro выполняет задачу':'Shiro свободен')+(s.last?'<br>'+esc(s.last):'');$('state').textContent='Провайдер: '+s.provider+'\\nМодель: '+s.model+'\\nСостояние: '+(s.busy?'Работает':'Ожидает');if(document.activeElement!==$('provider'))$('provider').value=s.provider;if(lastProvider!==s.provider){lastProvider=s.provider;$('models').innerHTML=(models[s.provider]||[]).map(m=>'<option value="'+esc(m)+'">').join('')}if(document.activeElement!==$('model'))$('model').value=s.model;$('question').style.display=s.question?'block':'none';$('qtext').textContent=s.question||'';renderSchedules(s.schedules||[])}catch(e){$('status').textContent='Ошибка соединения: '+e.message}}
-function renderSchedules(items){$('schedules').innerHTML=items.length?items.map(x=>`<div class="schedule"><div><strong>${esc(x.goal)}</strong><small>${esc(x.run_at.replace('T',' '))} · ${x.enabled?'Ожидает':'Завершено / отключено'}${x.last_result?' · '+esc(x.last_result):''}</small></div><button class="stop" onclick="deleteSchedule('${esc(x.id)}')">Удалить</button></div>`).join(''):'<div class="empty">Пока нет запланированных задач</div>'}
-async function applySettings(){try{await api('/api/settings',{provider:$('provider').value,model:$('model').value.trim()});lastProvider=null;await load()}catch(e){alert(e.message)}}
-async function runTask(){const goal=$('goal').value.trim();if(!goal)return;try{await api('/api/task',{goal});$('goal').value='';await load()}catch(e){alert(e.message)}}
-async function stopAgent(){try{await api('/api/stop');await load()}catch(e){alert(e.message)}}
-async function sendAnswer(){const text=$('answer').value.trim();if(!text)return;try{await api('/api/answer',{text});$('answer').value='';await load()}catch(e){alert(e.message)}}
-async function addSchedule(){const goal=$('scheduleGoal').value.trim(),run_at=$('scheduleTime').value;if(!goal||!run_at)return alert('Укажи задачу и время запуска.');try{await api('/api/schedules',{goal,run_at});$('scheduleGoal').value='';$('scheduleTime').value='';await load()}catch(e){alert(e.message)}}
-async function deleteSchedule(id){try{await fetch('/api/schedules/'+encodeURIComponent(id),{method:'DELETE'});await load()}catch(e){alert(e.message)}}
-$('goal').addEventListener('keydown',e=>{if(e.key==='Enter')runTask()});$('answer').addEventListener('keydown',e=>{if(e.key==='Enter')sendAnswer()});$('provider').addEventListener('change',()=>{const p=$('provider').value;$('models').innerHTML=(models[p]||[]).map(m=>'<option value="'+esc(m)+'">').join('');$('model').value=(models[p]||[''])[0]||''});
-function tick(){ $('clock').textContent=new Date().toLocaleString() }tick();setInterval(tick,1000);setInterval(load,1500);load();
+async function api(url,opts={}){const r=await fetch(url,opts);let data={};try{data=await r.json()}catch{}if(!r.ok)throw new Error(data.error||('HTTP '+r.status));return data}
+function setModelOptions(list){const dl=$('models');dl.replaceChildren();for(const name of list||[]){const o=document.createElement('option');o.value=name;dl.appendChild(o)}}
+async function load(){try{const s=await api('/api/state');models=s.models||models;$('status').textContent=(s.busy?'Working. ':'Idle. ')+(s.last||'');$('dot').className='dot'+(s.busy?' busy':'');$('modelNow').textContent=s.provider+' / '+s.model;if(!$('provider').matches(':focus'))$('provider').value=s.provider;if(lastProvider!==s.provider){lastProvider=s.provider;setModelOptions(models[s.provider])}if(document.activeElement!==$('model'))$('model').value=s.model;$('answerBox').style.display=s.question?'block':'none';$('questionText').textContent=s.question||'';renderSchedules(s.schedules||[]);$('runBtn').disabled=!!s.busy}catch(e){$('status').textContent='Connection error: '+e.message}}
+function renderSchedules(items){$('scheduleCount').textContent=items.length+' task(s)';const list=$('scheduleList');list.replaceChildren();if(!items.length){const e=document.createElement('div');e.className='small';e.textContent='No scheduled tasks yet.';list.appendChild(e);return}for(const item of items){const row=document.createElement('div');row.className='schedule';const main=document.createElement('div');main.className='schedule-main';const goal=document.createElement('div');goal.className='schedule-goal';goal.textContent=item.goal;const time=document.createElement('div');time.className='schedule-time';time.textContent=new Date(item.run_at).toLocaleString();const tag=document.createElement('div');tag.className='tag';tag.textContent=item.status;main.append(goal,time,tag);row.appendChild(main);if(item.status==='pending'){const b=document.createElement('button');b.className='danger';b.textContent='Delete';b.onclick=()=>deleteSchedule(item.id);row.appendChild(b)}list.appendChild(row)}}
+async function applySettings(){try{await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('provider').value,model:$('model').value.trim()})});$('settingsMessage').textContent='Settings applied.';lastProvider=null;load()}catch(e){$('settingsMessage').textContent=e.message}}
+async function runTask(){const goal=$('goal').value.trim();if(!goal)return;try{await api('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})});$('goal').value='';load()}catch(e){alert(e.message)}}
+async function stopAgent(){try{await api('/api/stop',{method:'POST'});load()}catch(e){alert(e.message)}}
+async function sendAnswer(){const text=$('answer').value.trim();if(!text)return;try{await api('/api/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});$('answer').value='';load()}catch(e){alert(e.message)}}
+async function addSchedule(){const goal=$('scheduledGoal').value.trim(),run_at=$('runAt').value;if(!goal||!run_at){$('scheduleMessage').textContent='Enter a task and date/time.';return}try{await api('/api/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal,run_at})});$('scheduledGoal').value='';$('scheduleMessage').textContent='Task scheduled.';load()}catch(e){$('scheduleMessage').textContent=e.message}}
+async function deleteSchedule(id){try{await api('/api/schedules/'+encodeURIComponent(id),{method:'DELETE'});load()}catch(e){alert(e.message)}}
+$('goal').addEventListener('keydown',e=>{if(e.key==='Enter')runTask()});$('answer').addEventListener('keydown',e=>{if(e.key==='Enter')sendAnswer()});$('provider').addEventListener('change',()=>{const p=$('provider').value;setModelOptions(models[p]||[]);$('model').value=(models[p]||[])[0]||''});
+const now=new Date();now.setMinutes(now.getMinutes()+5);now.setSeconds(0,0);$('runAt').value=new Date(now-now.getTimezoneOffset()*60000).toISOString().slice(0,16);
+setInterval(load,1500);load();
 </script></body></html>"""
+
 
 @app.route("/")
 def index():
     return Response(PAGE, mimetype="text/html")
+
 
 @app.route("/api/state")
 def api_state():
@@ -1340,20 +1163,23 @@ def api_state():
         schedules=schedules,
     )
 
+
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
     data = request.get_json(silent=True) or {}
     set_model(provider=data.get("provider"), model=data.get("model"))
     return jsonify(ok=True, provider=SET["provider"], model=current_model())
 
+
 @app.route("/api/task", methods=["POST"])
 def api_task():
     goal = (request.get_json(silent=True) or {}).get("goal", "").strip()
     if not goal:
-        return jsonify(error="empty"), 400
+        return jsonify(error="Task is empty."), 400
     if not start_goal(goal):
-        return jsonify(error="busy"), 409
+        return jsonify(error="Agent is busy."), 409
     return jsonify(ok=True)
+
 
 @app.route("/api/answer", methods=["POST"])
 def api_answer():
@@ -1361,50 +1187,40 @@ def api_answer():
     ANSWER_EVENT.set()
     return jsonify(ok=True)
 
+
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     stop_agent()
     return jsonify(ok=True)
 
+
 @app.route("/api/schedules", methods=["GET", "POST"])
 def api_schedules():
     if request.method == "GET":
         with SCHEDULE_LOCK:
-            return jsonify(items=[dict(x) for x in SCHEDULES])
+            return jsonify(schedules=[dict(x) for x in SCHEDULES])
     data = request.get_json(silent=True) or {}
-    goal = str(data.get("goal", "")).strip()
-    run_at = str(data.get("run_at", "")).strip()
-    if not goal or len(goal) > MAX_TEXT:
-        return jsonify(error="invalid goal"), 400
     try:
-        when = datetime.fromisoformat(run_at)
-    except Exception:
-        return jsonify(error="invalid date/time"), 400
-    if when <= datetime.now():
-        return jsonify(error="time must be in the future"), 400
-    item = {"id": uuid.uuid4().hex[:12], "goal": goal,
-            "run_at": when.isoformat(timespec="minutes"), "enabled": True, "last_result": ""}
-    with SCHEDULE_LOCK:
-        SCHEDULES.append(item)
-        save_schedules()
-    return jsonify(ok=True, item=item), 201
+        item = schedule_task(data.get("goal", ""), data.get("run_at", ""))
+    except (ValueError, TypeError) as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, schedule=item), 201
+
 
 @app.route("/api/schedules/<task_id>", methods=["DELETE"])
 def api_delete_schedule(task_id):
-    with SCHEDULE_LOCK:
-        before = len(SCHEDULES)
-        SCHEDULES[:] = [x for x in SCHEDULES if x.get("id") != task_id]
-        if len(SCHEDULES) == before:
-            return jsonify(error="not found"), 404
-        save_schedules()
+    if not delete_schedule(task_id):
+        return jsonify(error="Scheduled task not found."), 404
     return jsonify(ok=True)
 
+
 def run_web():
-    # No token login: bind to loopback so the unauthenticated control panel is not exposed to the LAN.
-    app.run(host="127.0.0.1", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
+    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
+    if _CONFIGURED_WEB_HOST not in ("127.0.0.1", "localhost"):
+        print("Web panel is local-only in this build; configured web_host was ignored.", flush=True)
     start_scheduler()
     threading.Thread(target=run_web, daemon=True).start()
     start_telegram()
